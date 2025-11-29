@@ -4,7 +4,7 @@ const {
     decodeMessage,
     listOfObjects
 } = require('./galacticbuf');
-const { registerUser, loginUser, authMiddleware } = require('./auth');
+const { registerUser, loginUser, authMiddleware, changePassword } = require('./auth');
 const { createOrder, getOrdersForWindow } = require('./orders');
 
 const app = express();
@@ -163,6 +163,20 @@ app.post('/orders', authMiddleware, (req, res) => {
     }
 
     return sendGalactic(res, { order_id: result.order.orderId }, 200);
+});
+
+app.put('/user/password', (req, res) => {
+    const body = req.galactic || {};
+    const { username, old_password, new_password } = body;
+
+    const result = changePassword(username, old_password, new_password);
+
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    // Success: 204 No Content
+    return res.status(204).end();
 });
 
 // -------------------- START SERVER --------------------
