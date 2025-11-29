@@ -1,9 +1,11 @@
-const VERSION = 0x01;
+const VERSION_V1 = 0x01;
+const VERSION_V2 = 0x02;
 
 const TYPE_INT = 0x01;
 const TYPE_STRING = 0x02;
 const TYPE_LIST = 0x03;
 const TYPE_OBJECT = 0x04;
+const TYPE_BYTES = 0x05;
 
 class GalacticList {
     constructor(elementType, items) {
@@ -25,21 +27,48 @@ function listOfObjects(items) {
     return new GalacticList('object', items);
 }
 
+// Helper for bytes type (v2)
+function bytes(data) {
+    let buf;
+    if (Buffer.isBuffer(data)) {
+        buf = data;
+    } else if (data instanceof Uint8Array) {
+        buf = Buffer.from(data);
+    } else if (typeof data === 'string') {
+        buf = Buffer.from(data, 'utf8');
+    } else {
+        throw new Error('Unsupported bytes value type');
+    }
+    return { __galactic_bytes: true, data: buf };
+}
+
 // ----------------- ENCODING -----------------
 
-function encodeMessage(obj) {
-    const fieldCount = countFields(obj);
-    const fieldsBuf = encodeFields(obj);
-    const totalLength = 4 + fieldsBuf.length;
-
-    if (totalLength > 0xffff) {
-        throw new Error('Message too long for GalacticBuf (max 65535 bytes)');
+function encodeMessage(obj, version = VERSION_V2) {
+    if (version !== VERSION_V1 && version !== VERSION_V2) {
+        throw new Error(`Unsupported GalacticBuf version for encoding: ${version}`);
     }
 
-    const header = Buffer.alloc(4);
-    header.writeUInt8(VERSION, 0);
+    const fieldCount = countFields(obj);
+    const fieldsBuf = encodeFields(obj, version);
+    const headerLength = version === VERSION_V1 ? 4 : 6;
+    const totalLength = headerLength + fieldsBuf.length;
+
+    if (version === VERSION_V1 && totalLength > 0xffff) {
+        throw new Error('Message too long for GalacticBuf v1 (max 65535 bytes)');
+    }
+    if (version === VERSION_V2 && totalLength > 0xffffffff) {
+        throw new Error('Message too long for GalacticBuf v2 (max 4GB)');
+    }
+
+    const header = Buffer.alloc(headerLength);
+    header.writeUInt8(version, 0);
     header.writeUInt8(fieldCount, 1);
-    header.writeUInt16BE(totalLength, 2);
+    if (version === VERSION_V1) {
+        header.writeUInt16BE(totalLength, 2);
+    } else {
+        header.writeUInt32BE(totalLength, 2);
+    }
 
     return Buffer.concat([header, fieldsBuf]);
 }
@@ -52,7 +81,7 @@ function countFields(obj) {
     }, 0);
 }
 
-function encodeFields(obj) {
+function encodeFields(obj, version) {
     const buffers = [];
     if (!obj || typeof obj !== 'object') return Buffer.alloc(0);
 
@@ -73,16 +102,22 @@ function encodeFields(obj) {
 
         if (value && value.__galactic_list) {
             typeCode = TYPE_LIST;
-            valueBuf = encodeList(value);
+            valueBuf = encodeList(value, version);
+        } else if (value && value.__galactic_bytes) {
+            typeCode = TYPE_BYTES;
+            valueBuf = encodeBytes(value.data, version);
         } else if (typeof value === 'number' || typeof value === 'bigint') {
             typeCode = TYPE_INT;
             valueBuf = encodeInt(value);
         } else if (typeof value === 'string') {
             typeCode = TYPE_STRING;
-            valueBuf = encodeString(value);
+            valueBuf = encodeString(value, version);
+        } else if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+            typeCode = TYPE_BYTES;
+            valueBuf = encodeBytes(value, version);
         } else if (value && typeof value === 'object') {
             typeCode = TYPE_OBJECT;
-            valueBuf = encodeObject(value);
+            valueBuf = encodeObject(value, version);
         } else {
             throw new Error(`Unsupported value type for field "${name}"`);
         }
@@ -112,18 +147,39 @@ function encodeInt(val) {
     return buf;
 }
 
-function encodeString(str) {
+function encodeString(str, version) {
     const data = Buffer.from(str, 'utf8');
-    if (data.length > 0xffff) {
-        throw new Error('String too long for GalacticBuf');
+    if (version === VERSION_V1 && data.length > 0xffff) {
+        throw new Error('String too long for GalacticBuf v1');
     }
-    const buf = Buffer.alloc(2 + data.length);
-    buf.writeUInt16BE(data.length, 0);
-    data.copy(buf, 2);
+    if (version === VERSION_V2 && data.length > 0xffffffff) {
+        throw new Error('String too long for GalacticBuf v2');
+    }
+
+    const lenBytes = version === VERSION_V1 ? 2 : 4;
+    const buf = Buffer.alloc(lenBytes + data.length);
+    if (version === VERSION_V1) {
+        buf.writeUInt16BE(data.length, 0);
+    } else {
+        buf.writeUInt32BE(data.length, 0);
+    }
+    data.copy(buf, lenBytes);
     return buf;
 }
 
-function encodeList(listWrapper) {
+function encodeBytes(data, version) {
+    // bytes type is defined in v2; we always use 4-byte length
+    const bufData = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (bufData.length > 0xffffffff) {
+        throw new Error('Bytes too long for GalacticBuf v2');
+    }
+    const buf = Buffer.alloc(4 + bufData.length);
+    buf.writeUInt32BE(bufData.length, 0);
+    bufData.copy(buf, 4);
+    return buf;
+}
+
+function encodeList(listWrapper, version) {
     const items = listWrapper.items || [];
     let elementTypeCode;
     switch (listWrapper.elementType) {
@@ -140,13 +196,21 @@ function encodeList(listWrapper) {
             throw new Error(`Unknown list element type: ${listWrapper.elementType}`);
     }
 
-    if (items.length > 0xffff) {
-        throw new Error('Too many list elements for GalacticBuf');
+    if (version === VERSION_V1 && items.length > 0xffff) {
+        throw new Error('Too many list elements for GalacticBuf v1');
+    }
+    if (version === VERSION_V2 && items.length > 0xffffffff) {
+        throw new Error('Too many list elements for GalacticBuf v2');
     }
 
-    const header = Buffer.alloc(1 + 2);
+    const countBytes = version === VERSION_V1 ? 2 : 4;
+    const header = Buffer.alloc(1 + countBytes);
     header.writeUInt8(elementTypeCode, 0);
-    header.writeUInt16BE(items.length, 1);
+    if (version === VERSION_V1) {
+        header.writeUInt16BE(items.length, 1);
+    } else {
+        header.writeUInt32BE(items.length, 1);
+    }
 
     const buffers = [header];
 
@@ -154,18 +218,18 @@ function encodeList(listWrapper) {
         if (elementTypeCode === TYPE_INT) {
             buffers.push(encodeInt(item));
         } else if (elementTypeCode === TYPE_STRING) {
-            buffers.push(encodeString(item));
+            buffers.push(encodeString(item, version));
         } else if (elementTypeCode === TYPE_OBJECT) {
-            buffers.push(encodeObject(item));
+            buffers.push(encodeObject(item, version));
         }
     }
 
     return Buffer.concat(buffers);
 }
 
-function encodeObject(obj) {
+function encodeObject(obj, version) {
     const fieldCount = countFields(obj);
-    const fieldsBuf = encodeFields(obj);
+    const fieldsBuf = encodeFields(obj, version);
     const header = Buffer.alloc(1);
     header.writeUInt8(fieldCount, 0);
     return Buffer.concat([header, fieldsBuf]);
@@ -182,24 +246,35 @@ function decodeMessage(buf) {
     }
 
     const version = buf.readUInt8(0);
-    if (version !== VERSION) {
+    if (version !== VERSION_V1 && version !== VERSION_V2) {
         throw new Error(`Unsupported GalacticBuf version: ${version}`);
     }
 
     const fieldCount = buf.readUInt8(1);
-    const totalLength = buf.readUInt16BE(2);
+    let totalLength;
+    let headerLength;
+    if (version === VERSION_V1) {
+        if (buf.length < 4) throw new Error('Buffer too short for v1 header');
+        totalLength = buf.readUInt16BE(2);
+        headerLength = 4;
+    } else {
+        if (buf.length < 6) throw new Error('Buffer too short for v2 header');
+        totalLength = buf.readUInt32BE(2);
+        headerLength = 6;
+    }
+
     if (totalLength !== buf.length) {
         throw new Error('Total length in header does not match buffer length');
     }
 
-    const [obj, offset] = decodeFields(fieldCount, buf, 4);
+    const [obj, offset] = decodeFields(fieldCount, buf, headerLength, version);
     if (offset !== buf.length) {
         throw new Error('Extra bytes after GalacticBuf message');
     }
     return obj;
 }
 
-function decodeFields(fieldCount, buf, offset) {
+function decodeFields(fieldCount, buf, offset, version) {
     const result = {};
     let currentOffset = offset;
 
@@ -235,23 +310,33 @@ function decodeFields(fieldCount, buf, offset) {
                 value = big;
             }
         } else if (typeCode === TYPE_STRING) {
-            if (currentOffset + 2 > buf.length) {
+            const lenBytes = version === VERSION_V1 ? 2 : 4;
+            if (currentOffset + lenBytes > buf.length) {
                 throw new Error('Buffer too short for string length');
             }
-            const len = buf.readUInt16BE(currentOffset);
-            currentOffset += 2;
+            const len =
+                version === VERSION_V1
+                    ? buf.readUInt16BE(currentOffset)
+                    : buf.readUInt32BE(currentOffset);
+            currentOffset += lenBytes;
             if (currentOffset + len > buf.length) {
                 throw new Error('Buffer too short for string data');
             }
             value = buf.toString('utf8', currentOffset, currentOffset + len);
             currentOffset += len;
         } else if (typeCode === TYPE_LIST) {
-            if (currentOffset + 3 > buf.length) {
+            const countBytes = version === VERSION_V1 ? 2 : 4;
+            if (currentOffset + 1 + countBytes > buf.length) {
                 throw new Error('Buffer too short for list header');
             }
             const elementType = buf.readUInt8(currentOffset);
-            const elementCount = buf.readUInt16BE(currentOffset + 1);
-            currentOffset += 3;
+            let elementCount;
+            if (version === VERSION_V1) {
+                elementCount = buf.readUInt16BE(currentOffset + 1);
+            } else {
+                elementCount = buf.readUInt32BE(currentOffset + 1);
+            }
+            currentOffset += 1 + countBytes;
 
             const arr = [];
             for (let j = 0; j < elementCount; j++) {
@@ -269,11 +354,15 @@ function decodeFields(fieldCount, buf, offset) {
                         arr.push(big);
                     }
                 } else if (elementType === TYPE_STRING) {
-                    if (currentOffset + 2 > buf.length) {
+                    const lenBytes = version === VERSION_V1 ? 2 : 4;
+                    if (currentOffset + lenBytes > buf.length) {
                         throw new Error('Buffer too short for list string length');
                     }
-                    const len = buf.readUInt16BE(currentOffset);
-                    currentOffset += 2;
+                    const len =
+                        version === VERSION_V1
+                            ? buf.readUInt16BE(currentOffset)
+                            : buf.readUInt32BE(currentOffset);
+                    currentOffset += lenBytes;
                     if (currentOffset + len > buf.length) {
                         throw new Error('Buffer too short for list string data');
                     }
@@ -281,7 +370,7 @@ function decodeFields(fieldCount, buf, offset) {
                     currentOffset += len;
                     arr.push(s);
                 } else if (elementType === TYPE_OBJECT) {
-                    const [objVal, newOffset] = decodeObject(buf, currentOffset);
+                    const [objVal, newOffset] = decodeObject(buf, currentOffset, version);
                     currentOffset = newOffset;
                     arr.push(objVal);
                 } else {
@@ -290,9 +379,20 @@ function decodeFields(fieldCount, buf, offset) {
             }
             value = arr;
         } else if (typeCode === TYPE_OBJECT) {
-            const [objVal, newOffset] = decodeObject(buf, currentOffset);
+            const [objVal, newOffset] = decodeObject(buf, currentOffset, version);
             currentOffset = newOffset;
             value = objVal;
+        } else if (typeCode === TYPE_BYTES) {
+            if (currentOffset + 4 > buf.length) {
+                throw new Error('Buffer too short for bytes length');
+            }
+            const len = buf.readUInt32BE(currentOffset);
+            currentOffset += 4;
+            if (currentOffset + len > buf.length) {
+                throw new Error('Buffer too short for bytes data');
+            }
+            value = buf.subarray(currentOffset, currentOffset + len);
+            currentOffset += len;
         } else {
             throw new Error(`Unknown GalacticBuf type code: ${typeCode}`);
         }
@@ -303,12 +403,12 @@ function decodeFields(fieldCount, buf, offset) {
     return [result, currentOffset];
 }
 
-function decodeObject(buf, offset) {
+function decodeObject(buf, offset, version) {
     if (offset >= buf.length) {
         throw new Error('Unexpected end of buffer while reading object field count');
     }
     const fieldCount = buf.readUInt8(offset);
-    const [obj, newOffset] = decodeFields(fieldCount, buf, offset + 1);
+    const [obj, newOffset] = decodeFields(fieldCount, buf, offset + 1, version);
     return [obj, newOffset];
 }
 
@@ -318,8 +418,12 @@ module.exports = {
     listOfInts,
     listOfStrings,
     listOfObjects,
+    bytes,
     TYPE_INT,
     TYPE_STRING,
     TYPE_LIST,
-    TYPE_OBJECT
+    TYPE_OBJECT,
+    TYPE_BYTES,
+    VERSION_V1,
+    VERSION_V2
 };

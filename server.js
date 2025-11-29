@@ -1,27 +1,43 @@
+// server.js
 const express = require('express');
 const {
     encodeMessage,
     decodeMessage,
     listOfObjects
 } = require('./galacticbuf');
-const { registerUser, loginUser, changePassword, authMiddleware } = require('./auth');
-const { createOrder, getOrdersForWindow, findAndFillOrder } = require('./orders');
+const {
+    registerUser,
+    loginUser,
+    changePassword,
+    authMiddleware
+} = require('./auth');
+const {
+    ONE_HOUR_MS,
+    createOrder,
+    getOrdersForWindow,
+    findAndFillOrder,
+    placeOrderV2,
+    getV2OrderBook,
+    getMyActiveV2Orders
+} = require('./orders');
 const { getTrades, recordTrade } = require('./trades');
-const { createV2Order } = require('./orders_v2');
 
 const app = express();
 
+// Health check: simple 200 OK, no GalacticBuf required here.
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
+// Raw body parser for GalacticBuf
 app.use(
     express.raw({
         type: 'application/x-galacticbuf',
-        limit: '100kb'
+        limit: '100mb'
     })
 );
 
+// Middleware to decode GalacticBuf requests into req.galactic
 function galacticBufParser(req, res, next) {
     const contentType = req.headers['content-type'] || '';
 
@@ -45,6 +61,7 @@ function galacticBufParser(req, res, next) {
 
 app.use(galacticBufParser);
 
+// Helper to send GalacticBuf responses (v2 by default)
 function sendGalactic(res, obj, status = 200) {
     const buf = encodeMessage(obj);
     res.status(status);
@@ -55,13 +72,6 @@ function sendGalactic(res, obj, status = 200) {
 // -------------------- AUTH ENDPOINTS --------------------
 
 // POST /register
-// Request body (GalacticBuf):
-//   username (string)
-//   password (string)
-// Response:
-//   204 No Content on success
-//   400 on invalid input
-//   409 if username exists
 app.post('/register', (req, res) => {
     const body = req.galactic || {};
     const username = body.username;
@@ -76,11 +86,6 @@ app.post('/register', (req, res) => {
 });
 
 // POST /login
-// Request body (GalacticBuf):
-//   username (string)
-//   password (string)
-// Response (GalacticBuf):
-//   token (string)
 app.post('/login', (req, res) => {
     const body = req.galactic || {};
     const username = body.username;
@@ -95,14 +100,6 @@ app.post('/login', (req, res) => {
 });
 
 // PUT /user/password
-// Request body (GalacticBuf):
-//   username (string)
-//   old_password (string)
-//   new_password (string)
-// Response:
-//   204 No Content on success
-//   400 on invalid input
-//   401 on invalid old password or user not found
 app.put('/user/password', (req, res) => {
     const body = req.galactic || {};
     const username = body.username;
@@ -117,18 +114,9 @@ app.put('/user/password', (req, res) => {
     return res.status(204).end();
 });
 
-// -------------------- ORDERS ENDPOINTS --------------------
+// -------------------- LEGACY V1 ORDERS --------------------
 
-// GET /orders?delivery_start=...&delivery_end=...
-// Response (GalacticBuf):
-//   orders (list of objects)
-// Each order:
-//   order_id (string)
-//   price (int)
-//   quantity (int)
-//   delivery_start (int)
-//   delivery_end (int)
-// No authentication required.
+// GET /orders (public, V1-style sell orders)
 app.get('/orders', (req, res) => {
     const qs = req.query || {};
     const deliveryStartStr = qs.delivery_start;
@@ -164,15 +152,7 @@ app.get('/orders', (req, res) => {
     );
 });
 
-// POST /orders
-// Auth required (Bearer token).
-// Request body (GalacticBuf):
-//   price (int)
-//   quantity (int)
-//   delivery_start (int)
-//   delivery_end (int)
-// Response (GalacticBuf):
-//   order_id (string)
+// POST /orders (legacy submit sell order, no matching)
 app.post('/orders', authMiddleware, (req, res) => {
     const body = req.galactic || {};
 
@@ -184,15 +164,117 @@ app.post('/orders', authMiddleware, (req, res) => {
     return sendGalactic(res, { order_id: result.order.orderId }, 200);
 });
 
+// -------------------- V2 ORDER BOOK & MY ORDERS --------------------
+
+// GET /v2/orders
+// Public v2 order book for a given contract
+// Query: delivery_start, delivery_end
+// Response: { bids: [...], asks: [...] }
+app.get('/v2/orders', (req, res) => {
+    const qs = req.query || {};
+    const deliveryStartStr = qs.delivery_start;
+    const deliveryEndStr = qs.delivery_end;
+
+    if (deliveryStartStr === undefined || deliveryEndStr === undefined) {
+        return res.status(400).send('delivery_start and delivery_end are required');
+    }
+
+    const deliveryStart = Number(deliveryStartStr);
+    const deliveryEnd = Number(deliveryEndStr);
+
+    if (!Number.isFinite(deliveryStart) || !Number.isFinite(deliveryEnd)) {
+        return res.status(400).send('delivery_start and delivery_end must be numbers');
+    }
+
+    // Validate 1h aligned contract as in submit
+    if (
+        deliveryStart % ONE_HOUR_MS !== 0 ||
+        deliveryEnd % ONE_HOUR_MS !== 0 ||
+        deliveryEnd <= deliveryStart ||
+        deliveryEnd - deliveryStart !== ONE_HOUR_MS
+    ) {
+        return res.status(400).send('Invalid delivery window');
+    }
+
+    const { bids, asks } = getV2OrderBook(deliveryStart, deliveryEnd);
+
+    const bidObjects = bids.map((o) => ({
+        order_id: o.orderId,
+        price: o.price,
+        quantity: o.quantity
+    }));
+
+    const askObjects = asks.map((o) => ({
+        order_id: o.orderId,
+        price: o.price,
+        quantity: o.quantity
+    }));
+
+    return sendGalactic(
+        res,
+        {
+            bids: listOfObjects(bidObjects),
+            asks: listOfObjects(askObjects)
+        },
+        200
+    );
+});
+
+// GET /v2/my-orders
+// Auth required.
+// Response: { orders: [...] } newest first
+app.get('/v2/my-orders', authMiddleware, (req, res) => {
+    const myOrders = getMyActiveV2Orders(req.user);
+
+    const orderObjects = myOrders.map((o) => ({
+        order_id: o.orderId,
+        side: o.side.toLowerCase(),      // "buy" / "sell"
+        price: o.price,
+        quantity: o.quantity,
+        delivery_start: o.deliveryStart,
+        delivery_end: o.deliveryEnd,
+        timestamp: o.createdAt
+    }));
+
+    return sendGalactic(
+        res,
+        {
+            orders: listOfObjects(orderObjects)
+        },
+        200
+    );
+});
+
+// -------------------- V2 ORDERS (MATCHING ENGINE) --------------------
+
+// POST /v2/orders
+// Auth required.
+// Request: { side, price, quantity, delivery_start, delivery_end }
+// Response: { order_id, status, filled_quantity }
+app.post('/v2/orders', authMiddleware, (req, res) => {
+    const body = req.galactic || {};
+
+    const result = placeOrderV2(req.user, body, recordTrade);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    const order = result.order;
+
+    return sendGalactic(
+        res,
+        {
+            order_id: order.orderId,
+            status: order.status,
+            filled_quantity: result.filledQuantity
+        },
+        200
+    );
+});
+
 // -------------------- TRADES ENDPOINTS --------------------
 
-// POST /trades
-// Take an existing sell order.
-// Auth required (buyer must be logged in).
-// Request (GalacticBuf):
-//   order_id (string)
-// Response (GalacticBuf):
-//   trade_id (string)
+// POST /trades (manual take order, legacy)
 app.post('/trades', authMiddleware, (req, res) => {
     const body = req.galactic || {};
     const orderId = body.order_id;
@@ -207,30 +289,20 @@ app.post('/trades', authMiddleware, (req, res) => {
     }
 
     const order = result.order;
+    const qty = result.filledQuantity;
 
-    // buyer is authenticated user; seller is the user who created the order
     const trade = recordTrade({
         buyerId: req.user,
         sellerId: order.user,
         price: order.price,
-        quantity: order.quantity,
+        quantity: qty,
         timestamp: Date.now()
     });
 
     return sendGalactic(res, { trade_id: trade.tradeId }, 200);
 });
 
-// GET /trades
-// No query params, no auth required.
-// Response (GalacticBuf):
-//   trades (list of objects)
-// Each trade:
-//   trade_id (string)
-//   buyer_id (string)
-//   seller_id (string)
-//   price (int)
-//   quantity (int)
-//   timestamp (int)
+// GET /trades (public trade history)
 app.get('/trades', (req, res) => {
     const tradeList = getTrades();
 
@@ -252,21 +324,10 @@ app.get('/trades', (req, res) => {
     );
 });
 
-app.post('/v2/orders', authMiddleware, (req, res) => {
-    const body = req.galactic || {};
-
-    const result = createV2Order(req.user, body);
-    if (!result.ok) {
-        return res.status(result.status).send(result.message);
-    }
-
-    return sendGalactic(res, { order_id: result.order.orderId }, 200);
-});
-
 // -------------------- START SERVER --------------------
 
-    const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8080;
 
-    app.listen(PORT, () => {
-        console.log(`Galactic Energy Exchange listening on port ${PORT}`);
-    });
+app.listen(PORT, () => {
+    console.log(`Galactic Energy Exchange listening on port ${PORT}`);
+});
