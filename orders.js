@@ -243,8 +243,10 @@ function placeOrderV2(username, fields, recordTradeFn) {
         incomingOrder.status = 'FILLED';
     }
 
-    // Keep it in our internal list, but it's not visible in the book if inactive
-    orders.push(incomingOrder);
+    // IMPORTANT: only insert incoming order into internal list if it remains active (per spec).
+    if (incomingOrder.active && incomingOrder.quantity > 0) {
+        orders.push(incomingOrder);
+    }
 
     return {
         ok: true,
