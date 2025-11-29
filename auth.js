@@ -190,18 +190,24 @@ function isDnaSimilar(sample, reference, limit) {
 
 
 function registerDnaSample(username, password, sample) {
-    const login = loginUser(username, password);
-    if (!login.ok) return { ok: false, status: 401, message: 'Invalid credentials' };
+    if (!username || !password || typeof sample !== 'string') {
+        return { ok: false, status: 400, message: 'Invalid input' };
+    }
 
     if (!validateDnaSample(sample)) {
         return { ok: false, status: 400, message: 'Invalid DNA sample' };
     }
+
+    // now authenticate (401 for bad credentials)
+    const login = loginUser(username, password);
+    if (!login.ok) return { ok: false, status: 401, message: 'Invalid credentials' };
 
     if (!usersDna.has(username)) usersDna.set(username, new Set());
     usersDna.get(username).add(sample);
 
     return { ok: true };
 }
+
 
 function loginWithDna(username, sample) {
     if (!username || !validateDnaSample(sample)) {
