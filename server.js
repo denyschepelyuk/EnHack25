@@ -9,7 +9,9 @@ const {
     registerUser,
     loginUser,
     changePassword,
-    authMiddleware
+    authMiddleware,
+    registerDnaSample,
+    loginWithDna
 } = require('./auth');
 const {
     ONE_HOUR_MS,
@@ -112,6 +114,36 @@ app.put('/user/password', (req, res) => {
     }
 
     return res.status(204).end();
+});
+
+
+// DNA LOGIN:
+
+app.post('/dna-submit', (req, res) => {
+    const body = req.galactic || {};
+    const username = body.username;
+    const password = body.password;
+    const dnaSample = body.dna_sample;
+
+    const result = registerDnaSample(username, password, dnaSample);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    return res.status(204).end();
+});
+
+app.post('/dna-login', (req, res) => {
+    const body = req.galactic || {};
+    const username = body.username;
+    const dnaSample = body.dna_sample;
+
+    const result = loginWithDna(username, dnaSample);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    return sendGalactic(res, { token: result.token }, 200);
 });
 
 // -------------------- LEGACY V1 ORDERS --------------------

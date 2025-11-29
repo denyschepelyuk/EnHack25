@@ -91,9 +91,69 @@ function authMiddleware(req, res, next) {
     next();
 }
 
+function registerDnaSample(username, password, dnaSample) {
+    // 1. Authenticate user first
+    const loginResult = loginUser(username, password);
+    if (!loginResult.ok) {
+        return { ok: false, status: 401, message: 'Invalid credentials' };
+    }
+
+    // 2. Validate DNA format
+    if (!validateDnaSample(dnaSample)) {
+        return { ok: false, status: 400, message: 'Invalid DNA sample' };
+    }
+
+    // 3. Store sample
+    if (!usersDna.has(username)) {
+        usersDna.set(username, new Set());
+    }
+    usersDna.get(username).add(dnaSample);
+
+    return { ok: true };
+}
+
+function loginWithDna(username, submittedDna) {
+    // 1. Basic validation
+    if (!username || !validateDnaSample(submittedDna)) {
+        // Spec says 400 if invalid DNA or input
+        return { ok: false, status: 400, message: 'Invalid input' };
+    }
+
+    // 2. Check if user exists and has samples
+    const storedSamples = usersDna.get(username);
+    if (!users.has(username) || !storedSamples || storedSamples.size === 0) {
+        // Spec says 401 if user doesn't exist or no DNA registered
+        return { ok: false, status: 401, message: 'Authentication failed' };
+    }
+
+    // 3. Check similarity against ALL registered samples
+    let matchFound = false;
+
+    for (const referenceDna of storedSamples) {
+        const referenceCodonCount = referenceDna.length / 3;
+        const allowedDiff = Math.floor(referenceCodonCount / 100000);
+
+        if (isDnaSimilar(submittedDna, referenceDna, allowedDiff)) {
+            matchFound = true;
+            break;
+        }
+    }
+
+    if (!matchFound) {
+        return { ok: false, status: 401, message: 'DNA verification failed' };
+    }
+
+    // 4. Generate token
+    const token = crypto.randomBytes(32).toString('hex');
+    tokens.set(token, username);
+    return { ok: true, token };
+}
+
 module.exports = {
     registerUser,
     loginUser,
     changePassword,
-    authMiddleware
+    authMiddleware,
+    registerDnaSample,
+    loginWithDna
 };
