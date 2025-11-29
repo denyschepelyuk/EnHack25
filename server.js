@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const {
     encodeMessage,
@@ -12,12 +11,10 @@ const { createV2Order } = require('./orders_v2');
 
 const app = express();
 
-// Health check: simple 200 OK, no GalacticBuf required here.
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
-// Raw body parser for GalacticBuf
 app.use(
     express.raw({
         type: 'application/x-galacticbuf',
@@ -25,11 +22,9 @@ app.use(
     })
 );
 
-// Middleware to decode GalacticBuf requests into req.galactic
 function galacticBufParser(req, res, next) {
     const contentType = req.headers['content-type'] || '';
 
-    // Only parse for GalacticBuf content types with a body
     if (
         !contentType.startsWith('application/x-galacticbuf') ||
         !req.body ||
@@ -50,7 +45,6 @@ function galacticBufParser(req, res, next) {
 
 app.use(galacticBufParser);
 
-// Helper to send GalacticBuf responses
 function sendGalactic(res, obj, status = 200) {
     const buf = encodeMessage(obj);
     res.status(status);
@@ -161,7 +155,6 @@ app.get('/orders', (req, res) => {
         delivery_end: o.deliveryEnd
     }));
 
-    // Encode as list of objects using GalacticBuf helper
     return sendGalactic(
         res,
         {
