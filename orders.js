@@ -513,7 +513,8 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
             quantity: tq,
             delivery_start: ds,
             delivery_end: de,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            isV2: true // FIXED: Added isV2 flag to modifyOrder match execution
         });
 
         rest.quantity -= tq;

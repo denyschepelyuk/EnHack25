@@ -12,7 +12,9 @@ const {
     authMiddleware,
     registerDnaSample,
     loginWithDna,
-    getUsernameFromToken     // <-- REQUIRED for bulk operations
+    getUsernameFromToken,
+    setCollateral,
+    getCollateral
 } = require('./auth');
 const {
     ONE_HOUR_MS,
@@ -24,14 +26,16 @@ const {
     getMyActiveV2Orders,
     modifyOrderV2,
     cancelOrderV2,
-    snapshotOrders,          // <-- required
-    restoreOrders            // <-- required
+    snapshotOrders,
+    restoreOrders,
+    computePotentialBalance
 } = require('./orders');
 const {
     getTrades,
     recordTrade,
-    snapshotTrades,          // <-- required
-    restoreTrades            // <-- required
+    snapshotTrades,
+    restoreTrades,
+    getBalance
 } = require('./trades');
 
 const app = express();
@@ -496,7 +500,8 @@ app.post('/trades', authMiddleware, (req, res) => {
         quantity: qty,
         delivery_start: order.deliveryStart,
         delivery_end: order.deliveryEnd,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        isV2: false // Explicitly mark as legacy
     });
 
     return sendGalactic(res, { trade_id: trade.tradeId }, 200);
@@ -524,7 +529,58 @@ app.get('/trades', (req, res) => {
     );
 });
 
-const { setCollateral } = require('./auth');
+// GET /v2/trades (NEW: Public V2 trades for window)
+app.get('/v2/trades', (req, res) => {
+    const qs = req.query || {};
+    const deliveryStartStr = qs.delivery_start;
+    const deliveryEndStr = qs.delivery_end;
+
+    if (deliveryStartStr === undefined || deliveryEndStr === undefined) {
+        return res.status(400).send('delivery_start and delivery_end are required');
+    }
+
+    const deliveryStart = Number(deliveryStartStr);
+    const deliveryEnd = Number(deliveryEndStr);
+
+    if (!Number.isFinite(deliveryStart) || !Number.isFinite(deliveryEnd)) {
+        return res.status(400).send('delivery_start and delivery_end must be numbers');
+    }
+
+    if (
+        deliveryStart % ONE_HOUR_MS !== 0 ||
+        deliveryEnd % ONE_HOUR_MS !== 0 ||
+        deliveryEnd <= deliveryStart ||
+        deliveryEnd - deliveryStart !== ONE_HOUR_MS
+    ) {
+        return res.status(400).send('Invalid delivery window');
+    }
+
+    const allTrades = getTrades(); // Sorted desc by timestamp
+    const v2Trades = allTrades.filter(t => 
+        t.isV2 === true &&
+        t.delivery_start === deliveryStart &&
+        t.delivery_end === deliveryEnd
+    );
+
+    const tradeObjects = v2Trades.map(t => ({
+        trade_id: t.tradeId,
+        buyer_id: t.buyerId,
+        seller_id: t.sellerId,
+        price: t.price,
+        quantity: t.quantity,
+        delivery_start: t.delivery_start,
+        delivery_end: t.delivery_end,
+        timestamp: t.timestamp
+    }));
+
+    return sendGalactic(
+        res,
+        {
+            trades: listOfObjects(tradeObjects)
+        },
+        200
+    );
+});
 
 app.put('/collateral/:username', (req, res) => {
     const header = req.headers['authorization'] || '';
@@ -545,11 +601,6 @@ app.put('/collateral/:username', (req, res) => {
 
     return res.status(204).end();
 });
-
-
-const { getBalance } = require('./trades');
-const { getCollateral } = require('./auth');
-const { computePotentialBalance } = require('./orders');
 
 app.get('/balance', authMiddleware, (req, res) => {
     const user = req.user;
