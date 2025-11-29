@@ -519,6 +519,106 @@ app.get('/trades', (req, res) => {
     );
 });
 
+const { setCollateral } = require('./auth');
+
+app.put('/collateral/:username', (req, res) => {
+    const header = req.headers['authorization'] || '';
+    if (header !== 'Bearer password123') {
+        return res.status(401).end();
+    }
+
+    const username = req.params.username;
+    const body = req.galactic || {};
+    const c = body.collateral;
+
+    if (!Number.isInteger(c)) {
+        return res.status(400).send('collateral must be integer');
+    }
+
+    const result = setCollateral(username, c);
+    if (!result.ok) return res.status(result.status).send(result.message);
+
+    return res.status(204).end();
+});
+
+
+const { getBalance } = require('./trades');
+const { getCollateral } = require('./auth');
+const { computePotentialBalance } = require('./orders');
+
+app.get('/balance', authMiddleware, (req, res) => {
+    const user = req.user;
+
+    const balance = getBalance(user);
+    const potential = computePotentialBalance(user);
+    const collateral = getCollateral(user);
+
+    return sendGalactic(
+        res,
+        {
+            balance,
+            potential_balance: potential,
+            collateral: collateral === null ? -1 : collateral
+        },
+        200
+    );
+});
+
+
+app.get('/v2/my-trades', authMiddleware, (req, res) => {
+    const qs = req.query || {};
+    const deliveryStartStr = qs.delivery_start;
+    const deliveryEndStr = qs.delivery_end;
+
+    // Required params
+    if (deliveryStartStr === undefined || deliveryEndStr === undefined) {
+        return res.status(400).send('delivery_start and delivery_end are required');
+    }
+
+    const delivery_start = Number(deliveryStartStr);
+    const delivery_end = Number(deliveryEndStr);
+
+    // Must be integers
+    if (!Number.isInteger(delivery_start) || !Number.isInteger(delivery_end)) {
+        return res.status(400).send('delivery_start and delivery_end must be integers');
+    }
+
+    const userId = req.user.id;        // from authMiddleware
+    const username = req.user.username;
+
+    // Pull all trades (already sorted newest first)
+    const allTrades = getTrades();
+
+    // Filter only user’s trades for this delivery window
+    const myTrades = allTrades
+        .filter(t =>
+            t.delivery_start === delivery_start &&
+            t.delivery_end === delivery_end &&
+            (t.buyerId === userId || t.sellerId === userId)
+        )
+        .map(t => {
+            const isBuyer = t.buyerId === userId;
+            return {
+                trade_id: t.tradeId,
+                side: isBuyer ? 'buy' : 'sell',
+                price: t.price,
+                quantity: t.quantity,
+                counterparty: isBuyer ? t.sellerUsername : t.buyerUsername,
+                delivery_start: t.delivery_start,
+                delivery_end: t.delivery_end,
+                timestamp: t.timestamp
+            };
+        });
+
+    return sendGalactic(
+        res,
+        {
+            trades: listOfObjects(myTrades)
+        },
+        200
+    );
+});
+
 // -------------------- START SERVER --------------------
 
 const PORT = process.env.PORT || 8080;
