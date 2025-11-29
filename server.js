@@ -20,7 +20,9 @@ const {
     findAndFillOrder,
     placeOrderV2,
     getV2OrderBook,
-    getMyActiveV2Orders
+    getMyActiveV2Orders,
+    modifyOrderV2,
+    cancelOrderV2
 } = require('./orders');
 const { getTrades, recordTrade } = require('./trades');
 
@@ -115,7 +117,6 @@ app.put('/user/password', (req, res) => {
 
     return res.status(204).end();
 });
-
 
 // DNA LOGIN:
 
@@ -302,6 +303,46 @@ app.post('/v2/orders', authMiddleware, (req, res) => {
         },
         200
     );
+});
+
+// PUT /v2/orders/:orderId
+// Auth required.
+// Request: { price, quantity }
+// Response: { order_id, status, filled_quantity }
+app.put('/v2/orders/:orderId', authMiddleware, (req, res) => {
+    const orderId = req.params.orderId;
+    const body = req.galactic || {};
+
+    const result = modifyOrderV2(req.user, orderId, body, recordTrade);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message || '');
+    }
+
+    const order = result.order;
+
+    return sendGalactic(
+        res,
+        {
+            order_id: order.orderId,
+            status: order.status,
+            filled_quantity: result.filledQuantity
+        },
+        200
+    );
+});
+
+// DELETE /v2/orders/:orderId
+// Auth required.
+// Response: 204 on success
+app.delete('/v2/orders/:orderId', authMiddleware, (req, res) => {
+    const orderId = req.params.orderId;
+
+    const result = cancelOrderV2(req.user, orderId);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message || '');
+    }
+
+    return res.status(204).end();
 });
 
 // -------------------- TRADES ENDPOINTS --------------------

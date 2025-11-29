@@ -10,11 +10,11 @@ const ONE_HOUR_MS = 3600000;
 //   side: 'BUY' | 'SELL',
 //   price,
 //   quantity,          // remaining quantity
-//   originalQuantity,  // initial quantity
+//   originalQuantity,  // initial quantity (may increase on modify)
 //   deliveryStart,
 //   deliveryEnd,
 //   active: boolean,
-//   status: 'ACTIVE' | 'FILLED',
+//   status: 'ACTIVE' | 'FILLED' | 'CANCELLED',
 //   createdAt: number, // timestamp ms
 //   isV2: boolean      // true if created via /v2/orders
 // }
@@ -243,7 +243,7 @@ function placeOrderV2(username, fields, recordTradeFn) {
         incomingOrder.status = 'FILLED';
     }
 
-    // IMPORTANT: only insert incoming order into internal list if it remains active (per spec).
+    // Only keep it in internal list if it remains active (i.e. has remaining quantity)
     if (incomingOrder.active && incomingOrder.quantity > 0) {
         orders.push(incomingOrder);
     }
@@ -310,6 +310,192 @@ function getMyActiveV2Orders(username) {
     return mine;
 }
 
+// ---- V2 modify / cancel helpers ----
+
+// Internal: find an active, modifiable V2 order by id
+function findActiveV2Order(orderId) {
+    const order = orders.find((o) => o.orderId === orderId && o.isV2);
+    if (!order) return null;
+    if (!order.active || order.quantity <= 0 || order.status !== 'ACTIVE') return null;
+    return order;
+}
+
+// Modify an existing V2 order
+// fields: { price, quantity }
+// recordTradeFn: function({ buyerId, sellerId, price, quantity, timestamp })
+function modifyOrderV2(username, orderId, fields, recordTradeFn) {
+    const newPrice = fields.price;
+    const newQuantity = fields.quantity;
+
+    // Both fields required
+    if (newPrice === undefined || newQuantity === undefined) {
+        return { ok: false, status: 400, message: 'Both price and quantity are required' };
+    }
+
+    if (!Number.isInteger(newPrice)) {
+        return { ok: false, status: 400, message: 'Price must be an integer' };
+    }
+
+    if (!Number.isInteger(newQuantity)) {
+        return { ok: false, status: 400, message: 'Quantity must be an integer' };
+    }
+
+    if (newQuantity <= 0) {
+        // New quantity cannot be zero or negative
+        return { ok: false, status: 400, message: 'New quantity must be positive' };
+    }
+
+    const order = findActiveV2Order(orderId);
+    if (!order) {
+        // Not found, cancelled, or fully filled
+        return { ok: false, status: 404, message: 'Order not found or not modifiable' };
+    }
+
+    if (order.user !== username) {
+        return { ok: false, status: 403, message: 'Cannot modify another user\'s order' };
+    }
+
+    const now = Date.now();
+    const oldPrice = order.price;
+    const oldRemaining = order.quantity;
+
+    // Time priority rules
+    let resetTimePriority = false;
+    if (newPrice !== oldPrice) {
+        // Price change resets priority
+        resetTimePriority = true;
+    } else if (newQuantity > oldRemaining) {
+        // Quantity increase resets priority
+        resetTimePriority = true;
+    } else if (newQuantity < oldRemaining) {
+        // Quantity decrease preserves priority
+        // nothing special to do
+    }
+
+    // Apply modifications
+    order.price = newPrice;
+
+    // Modification sets the remaining quantity
+    order.quantity = newQuantity;
+
+    // If we increased remaining, it should be possible to fill more in total than originally
+    if (newQuantity > oldRemaining) {
+        const extra = newQuantity - oldRemaining;
+        order.originalQuantity += extra;
+    }
+
+    if (resetTimePriority) {
+        order.createdAt = now;
+    }
+
+    // Run matching logic with this modified order as the taker
+    const side = order.side;
+    const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
+    const deliveryStart = order.deliveryStart;
+    const deliveryEnd = order.deliveryEnd;
+
+    let remaining = order.quantity;
+    let filledQuantity = 0;
+
+    let candidates = orders.filter(
+        (o) =>
+            o.isV2 &&
+            o.active &&
+            o.side === oppositeSide &&
+            o.deliveryStart === deliveryStart &&
+            o.deliveryEnd === deliveryEnd &&
+            o.quantity > 0
+    );
+
+    if (side === 'BUY') {
+        // Buy: cheapest sells first, then oldest
+        candidates.sort((a, b) => {
+            if (a.price !== b.price) return a.price - b.price;
+            return a.createdAt - b.createdAt;
+        });
+    } else {
+        // Sell: highest bids first, then oldest
+        candidates.sort((a, b) => {
+            if (a.price !== b.price) return b.price - a.price;
+            return a.createdAt - b.createdAt;
+        });
+    }
+
+    for (const resting of candidates) {
+        if (remaining <= 0) break;
+
+        // Price crossing checks
+        if (side === 'BUY') {
+            if (order.price < resting.price) break; // buy_price >= sell_price
+        } else {
+            if (order.price > resting.price) break; // sell_price <= buy_price
+        }
+
+        const tradeQty = Math.min(remaining, resting.quantity);
+        if (tradeQty <= 0) continue;
+
+        const tradePrice = resting.price; // maker price
+        const buyerId = side === 'BUY' ? order.user : resting.user;
+        const sellerId = side === 'SELL' ? order.user : resting.user;
+
+        recordTradeFn({
+            buyerId,
+            sellerId,
+            price: tradePrice,
+            quantity: tradeQty,
+            timestamp: Date.now()
+        });
+
+        // Update resting order
+        resting.quantity -= tradeQty;
+        if (resting.quantity <= 0) {
+            resting.quantity = 0;
+            resting.active = false;
+            resting.status = 'FILLED';
+        }
+
+        // Update modified order
+        remaining -= tradeQty;
+        filledQuantity += tradeQty;
+    }
+
+    order.quantity = remaining;
+    if (remaining <= 0) {
+        order.quantity = 0;
+        order.active = false;
+        order.status = 'FILLED';
+    }
+
+    return {
+        ok: true,
+        order,
+        filledQuantity
+    };
+}
+
+// Cancel an existing V2 order
+function cancelOrderV2(username, orderId) {
+    const order = orders.find((o) => o.orderId === orderId && o.isV2);
+    if (!order || order.status === 'CANCELLED') {
+        return { ok: false, status: 404, message: 'Order not found or already cancelled' };
+    }
+
+    // Fully filled or inactive orders cannot be cancelled
+    if (!order.active || order.quantity <= 0 || order.status === 'FILLED') {
+        return { ok: false, status: 404, message: 'Order not cancellable' };
+    }
+
+    if (order.user !== username) {
+        return { ok: false, status: 403, message: 'Cannot cancel another user\'s order' };
+    }
+
+    order.active = false;
+    order.status = 'CANCELLED';
+    order.quantity = 0;
+
+    return { ok: true };
+}
+
 module.exports = {
     ONE_HOUR_MS,
     createOrder,
@@ -317,5 +503,7 @@ module.exports = {
     findAndFillOrder,
     placeOrderV2,
     getV2OrderBook,
-    getMyActiveV2Orders
+    getMyActiveV2Orders,
+    modifyOrderV2,
+    cancelOrderV2
 };
