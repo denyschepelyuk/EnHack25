@@ -1,4 +1,3 @@
-// auth.js
 const crypto = require('crypto');
 
 const users = new Map();   // username -> passwordHash

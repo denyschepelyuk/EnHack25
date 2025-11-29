@@ -1,6 +1,3 @@
-// galacticbuf.js
-// Implementation of the GalacticBuf binary protocol
-
 const VERSION = 0x01;
 
 const TYPE_INT = 0x01;

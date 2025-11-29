@@ -1,4 +1,3 @@
-# Dockerfile
 FROM node:20-alpine
 
 WORKDIR /app
@@ -15,5 +14,5 @@ ENV PORT=8080
 
 CMD ["npm", "start"]
 
-#docker build --platform=linux/amd64 -t registry.k8s.energyhack.cz/team-repo/galactic-energy-exchange:latest .
-#docker push registry.k8s.energyhack.cz/team-repo/galactic-energy-exchange:latest
+#docker build --platform=linux/amd64 -t registry.k8s.energyhack.cz/gorillaz/galactic-energy-exchange:latest .
+#docker push registry.k8s.energyhack.cz/gorillaz/galactic-energy-exchange:latest
