@@ -16,9 +16,14 @@ function applyTradeToBalances({ buyerId, sellerId, price, quantity }) {
 }
 
 function recordTrade({ 
-    buyerId, sellerId, buyerUsername, sellerUsername,
-    price, quantity,
-    delivery_start, delivery_end,
+    buyerId, 
+    sellerId, 
+    buyerUsername, 
+    sellerUsername,
+    price, 
+    quantity,
+    delivery_start,
+    delivery_end,
     timestamp
 }) {
     const tradeId = crypto.randomBytes(16).toString('hex');

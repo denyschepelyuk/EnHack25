@@ -578,18 +578,18 @@ app.get('/v2/my-trades', authMiddleware, (req, res) => {
     const delivery_start = Number(deliveryStartStr);
     const delivery_end = Number(deliveryEndStr);
 
-    // Must be integers
     if (!Number.isInteger(delivery_start) || !Number.isInteger(delivery_end)) {
         return res.status(400).send('delivery_start and delivery_end must be integers');
     }
 
-    const userId = req.user.id;        // from authMiddleware
-    const username = req.user.username;
+    if (delivery_start >= delivery_end) {
+        return res.status(400).send('delivery_start must be < delivery_end');
+    }
 
-    // Pull all trades (already sorted newest first)
+
+    const userId = req.user.id;
+
     const allTrades = getTrades();
-
-    // Filter only user’s trades for this delivery window
     const myTrades = allTrades
         .filter(t =>
             t.delivery_start === delivery_start &&
@@ -608,7 +608,8 @@ app.get('/v2/my-trades', authMiddleware, (req, res) => {
                 delivery_end: t.delivery_end,
                 timestamp: t.timestamp
             };
-        });
+        })
+        .sort((a,b) => b.timestamp - a.timestamp);
 
     return sendGalactic(
         res,
