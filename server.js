@@ -519,6 +519,52 @@ app.get('/trades', (req, res) => {
     );
 });
 
+const { setCollateral } = require('./auth');
+
+app.put('/collateral/:username', (req, res) => {
+    const header = req.headers['authorization'] || '';
+    if (header !== 'Bearer password123') {
+        return res.status(401).end();
+    }
+
+    const username = req.params.username;
+    const body = req.galactic || {};
+    const c = body.collateral;
+
+    if (!Number.isInteger(c)) {
+        return res.status(400).send('collateral must be integer');
+    }
+
+    const result = setCollateral(username, c);
+    if (!result.ok) return res.status(result.status).send(result.message);
+
+    return res.status(204).end();
+});
+
+
+const { getBalance } = require('./trades');
+const { getCollateral } = require('./auth');
+const { computePotentialBalance } = require('./orders');
+
+app.get('/balance', authMiddleware, (req, res) => {
+    const user = req.user;
+
+    const balance = getBalance(user);
+    const potential = computePotentialBalance(user);
+    const collateral = getCollateral(user);
+
+    return sendGalactic(
+        res,
+        {
+            balance,
+            potential_balance: potential,
+            collateral: collateral === null ? -1 : collateral
+        },
+        200
+    );
+});
+
+
 app.get('/v2/my-trades', authMiddleware, (req, res) => {
     const qs = req.query || {};
     const deliveryStartStr = qs.delivery_start;
