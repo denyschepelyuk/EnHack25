@@ -104,15 +104,15 @@ async function main() {
     );
 
     if (createOrderRes.status !== 200) {
-        console.error('Order creation failed, cannot list orders');
+        console.error('Order creation failed, cannot continue');
         return;
     }
 
     const orderId = createOrderRes.decoded.order_id;
     console.log('Created order with ID:', orderId);
 
-    // ----------------- LIST ORDERS -----------------
-    console.log('\n--- LIST ORDERS ---');
+    // ----------------- LIST ORDERS BEFORE TAKING -----------------
+    console.log('\n--- LIST ORDERS (before take) ---');
 
     const listUrl = `/orders?delivery_start=${deliveryStart}&delivery_end=${deliveryEnd}`;
     const listResRaw = await fetch(BASE_URL + listUrl);
@@ -130,6 +130,59 @@ async function main() {
     }
 
     console.log('GET /orders -> status', listStatus, 'body:', listDecoded);
+
+    // ----------------- TAKE ORDER (CREATE TRADE) -----------------
+    console.log('\n--- TAKE ORDER (POST /trades) ---');
+
+    const takeRes = await sendGalactic(
+        'POST',
+        '/trades',
+        { order_id: orderId },
+        token
+    );
+
+    console.log('POST /trades -> status', takeRes.status, 'body:', takeRes.decoded);
+
+    if (takeRes.status !== 200) {
+        console.error('Taking order failed, cannot show trades');
+        return;
+    }
+
+    // ----------------- LIST TRADES -----------------
+    console.log('\n--- LIST TRADES ---');
+
+    const tradesResRaw = await fetch(BASE_URL + '/trades');
+    const tradesStatus = tradesResRaw.status;
+    const tradesContentType = tradesResRaw.headers.get('content-type') || '';
+
+    let tradesDecoded;
+    if (tradesContentType.startsWith('application/x-galacticbuf')) {
+        const ab = await tradesResRaw.arrayBuffer();
+        const buf = Buffer.from(ab);
+        tradesDecoded = decodeMessage(buf);
+    } else {
+        tradesDecoded = await tradesResRaw.text();
+    }
+
+    console.log('GET /trades -> status', tradesStatus, 'body:', tradesDecoded);
+
+    // ----------------- LIST ORDERS AFTER TAKING -----------------
+    console.log('\n--- LIST ORDERS (after take) ---');
+
+    const listAfterResRaw = await fetch(BASE_URL + listUrl);
+    const listAfterStatus = listAfterResRaw.status;
+    const listAfterContentType = listAfterResRaw.headers.get('content-type') || '';
+
+    let listAfterDecoded;
+    if (listAfterContentType.startsWith('application/x-galacticbuf')) {
+        const ab = await listAfterResRaw.arrayBuffer();
+        const buf = Buffer.from(ab);
+        listAfterDecoded = decodeMessage(buf);
+    } else {
+        listAfterDecoded = await listAfterResRaw.text();
+    }
+
+    console.log('GET /orders (after take) -> status', listAfterStatus, 'body:', listAfterDecoded);
 }
 
 main().catch((err) => {

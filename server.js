@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const {
     encodeMessage,
@@ -5,7 +6,8 @@ const {
     listOfObjects
 } = require('./galacticbuf');
 const { registerUser, loginUser, authMiddleware } = require('./auth');
-const { createOrder, getOrdersForWindow } = require('./orders');
+const { createOrder, getOrdersForWindow, findAndFillOrder } = require('./orders');
+const { getTrades, recordTrade } = require('./trades');
 
 const app = express();
 
@@ -165,10 +167,78 @@ app.post('/orders', authMiddleware, (req, res) => {
     return sendGalactic(res, { order_id: result.order.orderId }, 200);
 });
 
+// -------------------- TRADES ENDPOINTS --------------------
+
+// POST /trades
+// Take an existing sell order.
+// Auth required (buyer must be logged in).
+// Request (GalacticBuf):
+//   order_id (string)
+// Response (GalacticBuf):
+//   trade_id (string)
+app.post('/trades', authMiddleware, (req, res) => {
+    const body = req.galactic || {};
+    const orderId = body.order_id;
+
+    if (!orderId || typeof orderId !== 'string') {
+        return res.status(400).send('order_id is required');
+    }
+
+    const result = findAndFillOrder(orderId);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    const order = result.order;
+
+    // buyer is authenticated user; seller is the user who created the order
+    const trade = recordTrade({
+        buyerId: req.user,
+        sellerId: order.user,
+        price: order.price,
+        quantity: order.quantity,
+        timestamp: Date.now()
+    });
+
+    return sendGalactic(res, { trade_id: trade.tradeId }, 200);
+});
+
+// GET /trades
+// No query params, no auth required.
+// Response (GalacticBuf):
+//   trades (list of objects)
+// Each trade:
+//   trade_id (string)
+//   buyer_id (string)
+//   seller_id (string)
+//   price (int)
+//   quantity (int)
+//   timestamp (int)
+app.get('/trades', (req, res) => {
+    const tradeList = getTrades();
+
+    const tradeObjects = tradeList.map((t) => ({
+        trade_id: t.tradeId,
+        buyer_id: t.buyerId,
+        seller_id: t.sellerId,
+        price: t.price,
+        quantity: t.quantity,
+        timestamp: t.timestamp
+    }));
+
+    return sendGalactic(
+        res,
+        {
+            trades: listOfObjects(tradeObjects)
+        },
+        200
+    );
+});
+
 // -------------------- START SERVER --------------------
 
-const PORT = process.env.PORT || 8080;
+    const PORT = process.env.PORT || 8080;
 
-app.listen(PORT, () => {
-    console.log(`Galactic Energy Exchange listening on port ${PORT}`);
-});
+    app.listen(PORT, () => {
+        console.log(`Galactic Energy Exchange listening on port ${PORT}`);
+    });

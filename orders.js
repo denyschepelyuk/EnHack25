@@ -1,8 +1,10 @@
+// orders.js
 const crypto = require('crypto');
 
 const ONE_HOUR_MS = 3600000;
 
-const orders = []; // { orderId, user, price, quantity, deliveryStart, deliveryEnd, active }
+// order: { orderId, user, price, quantity, deliveryStart, deliveryEnd, active, status }
+const orders = [];
 
 function generateOrderId() {
     return crypto.randomBytes(16).toString('hex');
@@ -55,7 +57,8 @@ function createOrder(username, fields) {
         quantity,
         deliveryStart,
         deliveryEnd,
-        active: true
+        active: true,
+        status: 'ACTIVE'
     };
 
     orders.push(order);
@@ -74,7 +77,24 @@ function getOrdersForWindow(deliveryStart, deliveryEnd) {
     return filtered;
 }
 
+// Used by POST /trades (take order)
+function findAndFillOrder(orderId) {
+    const order = orders.find((o) => o.orderId === orderId);
+    if (!order || !order.active) {
+        return {
+            ok: false,
+            status: 404,
+            message: 'Order not found or not active'
+        };
+    }
+
+    order.active = false;
+    order.status = 'FILLED';
+    return { ok: true, order };
+}
+
 module.exports = {
     createOrder,
-    getOrdersForWindow
+    getOrdersForWindow,
+    findAndFillOrder
 };
