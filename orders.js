@@ -52,6 +52,8 @@ function validateOrderFields(price, quantity, deliveryStart, deliveryEnd) {
     return { ok: true };
 }
 
+// ---- V1 / legacy submit order ----
+
 // Legacy endpoint /orders: submit SELL orders only, no matching.
 function createOrder(username, fields) {
     const price = fields.price;
@@ -119,7 +121,7 @@ function findAndFillOrder(orderId) {
     return { ok: true, order, filledQuantity: filledQty };
 }
 
-// V2 matching engine: POST /v2/orders
+// ---- V2 matching engine: POST /v2/orders ----
 // fields: { side, price, quantity, delivery_start, delivery_end }
 // recordTradeFn: function({ buyerId, sellerId, price, quantity, timestamp })
 function placeOrderV2(username, fields, recordTradeFn) {
@@ -166,10 +168,10 @@ function placeOrderV2(username, fields, recordTradeFn) {
 
     const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
 
-    // Candidate resting orders in the same contract, opposite side, active, V2 only
+    // Candidate resting orders in the same contract, opposite side, ACTIVE, V2 only
     let candidates = orders.filter(
         (o) =>
-            o.isV2 &&                 // <--- important: only V2 orders
+            o.isV2 &&
             o.active &&
             o.side === oppositeSide &&
             o.deliveryStart === deliveryStart &&
@@ -177,16 +179,15 @@ function placeOrderV2(username, fields, recordTradeFn) {
             o.quantity > 0
     );
 
-
-    // Sort by price-time priority
+    // Price-time priority
     if (side === 'BUY') {
-        // Match cheapest sells first, then oldest
+        // Buy: cheapest sells first, then oldest
         candidates.sort((a, b) => {
             if (a.price !== b.price) return a.price - b.price;
             return a.createdAt - b.createdAt;
         });
     } else {
-        // side === 'SELL': match highest bids first, then oldest
+        // Sell: highest bids first, then oldest
         candidates.sort((a, b) => {
             if (a.price !== b.price) return b.price - a.price;
             return a.createdAt - b.createdAt;
@@ -196,25 +197,19 @@ function placeOrderV2(username, fields, recordTradeFn) {
     for (const resting of candidates) {
         if (remaining <= 0) break;
 
-        // Price crossing check
+        // Price crossing checks
         if (side === 'BUY') {
             // buy_price >= sell_price
-            if (incomingOrder.price < resting.price) {
-                // Because list is sorted by price, no further candidate will match
-                break;
-            }
+            if (incomingOrder.price < resting.price) break;
         } else {
             // side === 'SELL', sell_price <= buy_price
-            if (incomingOrder.price > resting.price) {
-                // No further candidate will have better (higher) price
-                break;
-            }
+            if (incomingOrder.price > resting.price) break;
         }
 
         const tradeQty = Math.min(remaining, resting.quantity);
         if (tradeQty <= 0) continue;
 
-        const tradePrice = resting.price; // maker (resting) price
+        const tradePrice = resting.price; // maker price
         const buyerId = side === 'BUY' ? incomingOrder.user : resting.user;
         const sellerId = side === 'SELL' ? incomingOrder.user : resting.user;
 
@@ -248,7 +243,7 @@ function placeOrderV2(username, fields, recordTradeFn) {
         incomingOrder.status = 'FILLED';
     }
 
-    // We keep the order in our internal list (for "My Orders" etc.)
+    // Keep it in our internal list, but it's not visible in the book if inactive
     orders.push(incomingOrder);
 
     return {
