@@ -8,6 +8,7 @@ const {
 const { registerUser, loginUser, changePassword, authMiddleware } = require('./auth');
 const { createOrder, getOrdersForWindow, findAndFillOrder } = require('./orders');
 const { getTrades, recordTrade } = require('./trades');
+const { createV2Order } = require('./orders_v2');
 
 const app = express();
 
@@ -256,6 +257,17 @@ app.get('/trades', (req, res) => {
         },
         200
     );
+});
+
+app.post('/v2/orders', authMiddleware, (req, res) => {
+    const body = req.galactic || {};
+
+    const result = createV2Order(req.user, body);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    return sendGalactic(res, { order_id: result.order.orderId }, 200);
 });
 
 // -------------------- START SERVER --------------------
