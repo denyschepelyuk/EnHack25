@@ -107,98 +107,54 @@ function splitToCodons(dna) {
     }
     return codons;
 }
-
 function isDnaSimilar(sampleDna, referenceDna, limit) {
     const n = sampleDna.length / 3;
     const m = referenceDna.length / 3;
 
-    // Optimization: If length difference is already > limit, impossible to match
     if (Math.abs(n - m) > limit) return false;
-
-    // Optimization: Exact match
     if (limit === 0) return sampleDna === referenceDna;
 
+    const S = [];
+    const T = [];
+    for (let i = 0; i < sampleDna.length; i += 3) S.push(sampleDna.substr(i, 3));
+    for (let i = 0; i < referenceDna.length; i += 3) T.push(referenceDna.substr(i, 3));
 
+    let prev = new Array(m + 1).fill(Infinity);
+    let curr = new Array(m + 1).fill(Infinity);
 
+    for (let j = 0; j <= m; j++) prev[j] = j;
 
-    // We only need two rows for DP
-    let prevRow = new Array(m + 1);
-    let currRow = new Array(m + 1);
-
-    // Initialize first row
-    for (let j = 0; j <= m; j++) {
-        prevRow[j] = j;
-    }
-
-    // Loop through codons of sampleDna
     for (let i = 1; i <= n; i++) {
-        // Calculate the "band" of indices we need to check.
-        // We only care about cells where |i - j| <= limit
-        // Because any path outside this band essentially costs > limit.
         const start = Math.max(1, i - limit);
-        const end = Math.min(m, i + limit);
+        const end   = Math.min(m, i + limit);
 
-        // Current row initialization (infinity for out of bounds logic)
-        // We set index 0 explicitly, others are filled in the loop
-        currRow[0] = i; 
-        
-        // Optimization: track min value in this row to exit early if > limit
-        let minInRow = Infinity;
+        curr.fill(Infinity);
 
-        // If start > 1, we effectively treat currRow[start-1] as Infinity
-        // so we don't need to fill the whole array with Infinity, just the active window.
-        
+        curr[0] = i;
+
+        let best = Infinity;
+
         for (let j = start; j <= end; j++) {
-            // FIX 3: Access substrings directly without splitToCodons array overhead
-            const codonS = sampleDna.substring((i - 1) * 3, i * 3);
-            const codonT = referenceDna.substring((j - 1) * 3, j * 3);
-            
-            const cost = (codonS === codonT) ? 0 : 1;
+            const cost = S[i - 1] === T[j - 1] ? 0 : 1;
 
-            // prevRow[j]   => deletion (up)
-            // currRow[j-1] => insertion (left) -- note: if j=start, check boundary logic
-            // prevRow[j-1] => substitution (diagonal)
-            
-            // Boundary handling for the window:
-            // If j is at the start of the window, we assume the cell to the left is effectively infinite
-            // UNLESS j=1, where currRow[0] is `i`.
-            let left = Infinity;
-            if (j > start) {
-                left = currRow[j - 1];
-            } else if (j === 1) {
-                left = currRow[0];
-            }
-
-            // If j is far to the right, prevRow[j] might be outside previous window?
-            // Since we iterate i one by one, the previous window [i-1-limit, i-1+limit] overlaps correctly.
-            
-            currRow[j] = Math.min(
-                prevRow[j] + 1,       // deletion
-                left + 1,             // insertion
-                prevRow[j - 1] + cost // substitution
+            curr[j] = Math.min(
+                prev[j] + 1,
+                curr[j - 1] + 1,
+                prev[j - 1] + cost
             );
 
-            if (currRow[j] < minInRow) {
-                minInRow = currRow[j];
-            }
+            if (curr[j] < best) best = curr[j];
         }
 
-        // Optimization: If the best path in this row exceeds limit, we can stop
-        if (minInRow > limit) return false;
+        if (best > limit) return false;
 
-        // Swap rows for next iteration
-        // Note: We must slice or copy if we want to be safe, but since we 
-        // overwrite valid indices in the window, swapping references is fine
-        // as long as we handle the 'undefined' or 'dirty' data outside window correctly.
-        // To be safe in JS, let's copy the values needed or just swap.
-        const temp = prevRow;
-        prevRow = currRow;
-        currRow = temp;
-        // Clean currRow for next usage not strictly necessary if we rely on start/end,
-        // but safer to avoid reading stale data if logic changes.
+        // swap
+        const tmp = prev;
+        prev = curr;
+        curr = tmp;
     }
 
-    return prevRow[m] <= limit;
+    return prev[m] <= limit;
 }
 
 function registerDnaSample(username, password, dnaSample) {
