@@ -1,3 +1,9 @@
+// test-client.js
+// Test client: prints "<endpoint> - OK" or "<endpoint>:\n  FAILED - ..."
+// and exits with code 1 if anything failed.
+//
+// Requires Node 18+ (for global fetch)
+
 const { encodeMessage, decodeMessage } = require('./galacticbuf');
 
 const BASE_URL = 'http://localhost:8080';
@@ -25,7 +31,7 @@ async function sendGalactic(method, path, bodyObj, token) {
     const contentType = res.headers.get('content-type') || '';
 
     let decoded = null;
-    if (contentType.startsWith('application/x-galacticbuf')) {
+    if (contentType && contentType.startsWith('application/x-galacticbuf')) {
         const arrayBuf = await res.arrayBuffer();
         const nodeBuf = Buffer.from(arrayBuf);
         decoded = decodeMessage(nodeBuf);
@@ -36,149 +42,241 @@ async function sendGalactic(method, path, bodyObj, token) {
     return { status, decoded };
 }
 
+// --- step tracking ---
+
+const results = [];
+let currentStepLabel = null;
+let stepFailed = false;
+let stepErrorDetail = null;
+
+function ensure(condition, message, detail) {
+    if (!condition && !stepFailed) {
+        stepFailed = true;
+        stepErrorDetail = {
+            message,
+            ...(detail || {})
+        };
+    }
+}
+
+async function runStep(label, fn) {
+    currentStepLabel = label;
+    stepFailed = false;
+    stepErrorDetail = null;
+
+    try {
+        await fn();
+    } catch (err) {
+        if (!stepFailed) {
+            stepFailed = true;
+            stepErrorDetail = {
+                message: 'Unhandled error',
+                error: String(err)
+            };
+        }
+    }
+
+    results.push({
+        label,
+        status: stepFailed ? 'FAILED' : 'OK',
+        detail: stepErrorDetail
+    });
+}
+
+// --- main test flow ---
+
 async function main() {
-    console.log('--- HEALTH CHECK ---');
-    const healthRes = await fetch(BASE_URL + '/health');
-    console.log('GET /health ->', healthRes.status, await healthRes.text());
+    // unique username each run
+    const username = 'alice-' + Date.now();
+    const originalPassword = 'password123';
+    const newPassword = 'password456';
 
-    // ----------------- REGISTER -----------------
-    console.log('\n--- REGISTER ---');
-    const username = 'alice';
-    const password = 'password123';
+    const deliveryStart = 3600000; // 1h
+    const deliveryEnd = 7200000;   // 2h
 
-    const reg = await sendGalactic('POST', '/register', {
-        username,
-        password
+    // 1) GET /health
+    await runStep('GET /health', async () => {
+        const res = await fetch(BASE_URL + '/health');
+        const text = await res.text();
+        ensure(
+            res.status === 200,
+            'health check status',
+            { expected: 200, got: res.status, body: text }
+        );
     });
 
-    console.log('POST /register -> status', reg.status, 'body:', reg.decoded);
+    // 2) POST /register
+    await runStep('POST /register', async () => {
+        const reg = await sendGalactic('POST', '/register', {
+            username,
+            password: originalPassword
+        });
 
-    // ----------------- LOGIN -----------------
-    console.log('\n--- LOGIN ---');
-    const login = await sendGalactic('POST', '/login', {
-        username,
-        password
+        ensure(
+            reg.status === 204,
+            'register status (expected 204 for new user)',
+            { expectedStatus: 204, gotStatus: reg.status, body: reg.decoded }
+        );
     });
 
-    console.log('POST /login -> status', login.status, 'body:', login.decoded);
+    let token1 = null;
+    let token2 = null;
 
-    if (login.status !== 200 || !login.decoded || !login.decoded.token) {
-        console.error('Login failed, cannot continue');
-        return;
+    // 3) POST /login (original password)
+    await runStep('POST /login (original password)', async () => {
+        const login1 = await sendGalactic('POST', '/login', {
+            username,
+            password: originalPassword
+        });
+
+        ensure(
+            login1.status === 200 &&
+            login1.decoded &&
+            typeof login1.decoded.token === 'string',
+            'login (original password)',
+            { expectedStatus: 200, gotStatus: login1.status, body: login1.decoded }
+        );
+
+        if (!stepFailed) {
+            token1 = login1.decoded.token;
+        }
+    });
+
+    // 4) POST /orders (token1)
+    await runStep('POST /orders (token1)', async () => {
+        const createOrder1 = await sendGalactic(
+            'POST',
+            '/orders',
+            {
+                price: 100,
+                quantity: 5,
+                delivery_start: deliveryStart,
+                delivery_end: deliveryEnd
+            },
+            token1
+        );
+
+        ensure(
+            createOrder1.status === 200 &&
+            createOrder1.decoded &&
+            createOrder1.decoded.order_id,
+            'create order with token1',
+            { expectedStatus: 200, gotStatus: createOrder1.status, body: createOrder1.decoded }
+        );
+    });
+
+    // 5) PUT /user/password
+    await runStep('PUT /user/password', async () => {
+        const changePasswordRes = await sendGalactic(
+            'PUT',
+            '/user/password',
+            {
+                username,
+                old_password: originalPassword,
+                new_password: newPassword
+            }
+        );
+
+        ensure(
+            changePasswordRes.status === 204,
+            'change password status',
+            { expectedStatus: 204, gotStatus: changePasswordRes.status, body: changePasswordRes.decoded }
+        );
+    });
+
+    // 6) POST /orders (old token1, expected 401)
+    await runStep('POST /orders (old token1, should be 401)', async () => {
+        const createOrderOldToken = await sendGalactic(
+            'POST',
+            '/orders',
+            {
+                price: 200,
+                quantity: 3,
+                delivery_start: deliveryStart,
+                delivery_end: deliveryEnd
+            },
+            token1
+        );
+
+        ensure(
+            createOrderOldToken.status === 401,
+            'old token still valid after password change (should be invalid)',
+            {
+                expectedStatus: 401,
+                gotStatus: createOrderOldToken.status,
+                body: createOrderOldToken.decoded
+            }
+        );
+    });
+
+    // 7) POST /login (new password)
+    await runStep('POST /login (new password)', async () => {
+        const login2 = await sendGalactic('POST', '/login', {
+            username,
+            password: newPassword
+        });
+
+        ensure(
+            login2.status === 200 &&
+            login2.decoded &&
+            typeof login2.decoded.token === 'string',
+            'login with new password',
+            { expectedStatus: 200, gotStatus: login2.status, body: login2.decoded }
+        );
+
+        if (!stepFailed) {
+            token2 = login2.decoded.token;
+        }
+    });
+
+    // 8) POST /orders (token2)
+    await runStep('POST /orders (token2)', async () => {
+        const createOrder2 = await sendGalactic(
+            'POST',
+            '/orders',
+            {
+                price: 150,
+                quantity: 10,
+                delivery_start: deliveryStart,
+                delivery_end: deliveryEnd
+            },
+            token2
+        );
+
+        ensure(
+            createOrder2.status === 200 &&
+            createOrder2.decoded &&
+            createOrder2.decoded.order_id,
+            'create order with token2',
+            { expectedStatus: 200, gotStatus: createOrder2.status, body: createOrder2.decoded }
+        );
+    });
+
+    // --- summary output ---
+    let anyFailed = false;
+
+    for (const r of results) {
+        if (r.status === 'OK') {
+            console.log(`${r.label} - OK`);
+        } else {
+            anyFailed = true;
+            console.log(`${r.label}:`);
+            console.log(`  FAILED - ${r.detail?.message || 'unknown error'}`);
+            console.log(
+                '  DETAILS:',
+                JSON.stringify(r.detail, null, 2)
+            );
+        }
     }
 
-    const token = login.decoded.token;
-    console.log('Received token:', token);
-
-    // ----------------- CREATE ORDER -----------------
-    console.log('\n--- CREATE ORDER ---');
-
-    // Use a fixed 1-hour window
-    const deliveryStart = 3600000; // 1h 
-    const deliveryEnd = 7200000;   // 2h 
-
-    const createOrderRes = await sendGalactic(
-        'POST',
-        '/orders',
-        {
-            price: 100,        
-            quantity: 5,          
-            delivery_start: deliveryStart,
-            delivery_end: deliveryEnd
-        },
-        token
-    );
-
-    console.log(
-        'POST /orders -> status',
-        createOrderRes.status,
-        'body:',
-        createOrderRes.decoded
-    );
-
-    if (createOrderRes.status !== 200) {
-        console.error('Order creation failed, cannot continue');
-        return;
-    }
-
-    const orderId = createOrderRes.decoded.order_id;
-    console.log('Created order with ID:', orderId);
-
-    // ----------------- LIST ORDERS BEFORE TAKING -----------------
-    console.log('\n--- LIST ORDERS (before take) ---');
-
-    const listUrl = `/orders?delivery_start=${deliveryStart}&delivery_end=${deliveryEnd}`;
-    const listResRaw = await fetch(BASE_URL + listUrl);
-
-    const listStatus = listResRaw.status;
-    const listContentType = listResRaw.headers.get('content-type') || '';
-
-    let listDecoded;
-    if (listContentType.startsWith('application/x-galacticbuf')) {
-        const ab = await listResRaw.arrayBuffer();
-        const buf = Buffer.from(ab);
-        listDecoded = decodeMessage(buf);
+    if (anyFailed) {
+        process.exit(1);
     } else {
-        listDecoded = await listResRaw.text();
+        process.exit(0);
     }
-
-    console.log('GET /orders -> status', listStatus, 'body:', listDecoded);
-
-    // ----------------- TAKE ORDER (CREATE TRADE) -----------------
-    console.log('\n--- TAKE ORDER (POST /trades) ---');
-
-    const takeRes = await sendGalactic(
-        'POST',
-        '/trades',
-        { order_id: orderId },
-        token
-    );
-
-    console.log('POST /trades -> status', takeRes.status, 'body:', takeRes.decoded);
-
-    if (takeRes.status !== 200) {
-        console.error('Taking order failed, cannot show trades');
-        return;
-    }
-
-    // ----------------- LIST TRADES -----------------
-    console.log('\n--- LIST TRADES ---');
-
-    const tradesResRaw = await fetch(BASE_URL + '/trades');
-    const tradesStatus = tradesResRaw.status;
-    const tradesContentType = tradesResRaw.headers.get('content-type') || '';
-
-    let tradesDecoded;
-    if (tradesContentType.startsWith('application/x-galacticbuf')) {
-        const ab = await tradesResRaw.arrayBuffer();
-        const buf = Buffer.from(ab);
-        tradesDecoded = decodeMessage(buf);
-    } else {
-        tradesDecoded = await tradesResRaw.text();
-    }
-
-    console.log('GET /trades -> status', tradesStatus, 'body:', tradesDecoded);
-
-    // ----------------- LIST ORDERS AFTER TAKING -----------------
-    console.log('\n--- LIST ORDERS (after take) ---');
-
-    const listAfterResRaw = await fetch(BASE_URL + listUrl);
-    const listAfterStatus = listAfterResRaw.status;
-    const listAfterContentType = listAfterResRaw.headers.get('content-type') || '';
-
-    let listAfterDecoded;
-    if (listAfterContentType.startsWith('application/x-galacticbuf')) {
-        const ab = await listAfterResRaw.arrayBuffer();
-        const buf = Buffer.from(ab);
-        listAfterDecoded = decodeMessage(buf);
-    } else {
-        listAfterDecoded = await listAfterResRaw.text();
-    }
-
-    console.log('GET /orders (after take) -> status', listAfterStatus, 'body:', listAfterDecoded);
 }
 
 main().catch((err) => {
-    console.error('Test client error:', err);
+    console.error('UNEXPECTED ERROR:', err);
     process.exit(1);
 });

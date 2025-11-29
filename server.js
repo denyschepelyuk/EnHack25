@@ -1,19 +1,22 @@
+// server.js
 const express = require('express');
 const {
     encodeMessage,
     decodeMessage,
     listOfObjects
 } = require('./galacticbuf');
-const { registerUser, loginUser, authMiddleware } = require('./auth');
+const { registerUser, loginUser, changePassword, authMiddleware } = require('./auth');
 const { createOrder, getOrdersForWindow, findAndFillOrder } = require('./orders');
 const { getTrades, recordTrade } = require('./trades');
 
 const app = express();
 
+// Health check: simple 200 OK, no GalacticBuf required here.
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
+// Raw body parser for GalacticBuf
 app.use(
     express.raw({
         type: 'application/x-galacticbuf',
@@ -21,9 +24,11 @@ app.use(
     })
 );
 
+// Middleware to decode GalacticBuf requests into req.galactic
 function galacticBufParser(req, res, next) {
     const contentType = req.headers['content-type'] || '';
 
+    // Only parse for GalacticBuf content types with a body
     if (
         !contentType.startsWith('application/x-galacticbuf') ||
         !req.body ||
@@ -44,6 +49,7 @@ function galacticBufParser(req, res, next) {
 
 app.use(galacticBufParser);
 
+// Helper to send GalacticBuf responses
 function sendGalactic(res, obj, status = 200) {
     const buf = encodeMessage(obj);
     res.status(status);
@@ -93,6 +99,29 @@ app.post('/login', (req, res) => {
     return sendGalactic(res, { token: result.token }, 200);
 });
 
+// PUT /user/password
+// Request body (GalacticBuf):
+//   username (string)
+//   old_password (string)
+//   new_password (string)
+// Response:
+//   204 No Content on success
+//   400 on invalid input
+//   401 on invalid old password or user not found
+app.put('/user/password', (req, res) => {
+    const body = req.galactic || {};
+    const username = body.username;
+    const oldPassword = body.old_password;
+    const newPassword = body.new_password;
+
+    const result = changePassword(username, oldPassword, newPassword);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    return res.status(204).end();
+});
+
 // -------------------- ORDERS ENDPOINTS --------------------
 
 // GET /orders?delivery_start=...&delivery_end=...
@@ -131,6 +160,7 @@ app.get('/orders', (req, res) => {
         delivery_end: o.deliveryEnd
     }));
 
+    // Encode as list of objects using GalacticBuf helper
     return sendGalactic(
         res,
         {
@@ -184,6 +214,7 @@ app.post('/trades', authMiddleware, (req, res) => {
 
     const order = result.order;
 
+    // buyer is authenticated user; seller is the user who created the order
     const trade = recordTrade({
         buyerId: req.user,
         sellerId: order.user,
@@ -226,6 +257,8 @@ app.get('/trades', (req, res) => {
         200
     );
 });
+
+// -------------------- START SERVER --------------------
 
     const PORT = process.env.PORT || 8080;
 

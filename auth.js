@@ -40,33 +40,37 @@ function loginUser(username, password) {
     return { ok: true, token };
 }
 
-function changePassword(username, oldPassword, newPassword) {
-    // 1. Validate Input
-    if (!username || !oldPassword || !newPassword) {
-        return { ok: false, status: 400, message: 'Invalid input' };
-    }
-
-    // 2. Verify User and Old Password
-    const storedHash = users.get(username);
-    if (!storedHash) {
-        return { ok: false, status: 401, message: 'Invalid credentials' }; // User not found
-    }
-
-    const oldHash = hashPassword(oldPassword);
-    if (storedHash !== oldHash) {
-        return { ok: false, status: 401, message: 'Invalid credentials' }; // Wrong password
-    }
-
-    // 3. Update to New Password
-    const newHash = hashPassword(newPassword);
-    users.set(username, newHash);
-
-    // 4. Invalidate ALL existing tokens for this user
+// Invalidate all tokens for a given username
+function invalidateTokensForUser(username) {
     for (const [token, user] of tokens.entries()) {
         if (user === username) {
             tokens.delete(token);
         }
     }
+}
+
+// Change password and invalidate all tokens for that user
+function changePassword(username, oldPassword, newPassword) {
+    if (!username || !oldPassword || !newPassword) {
+        return { ok: false, status: 400, message: 'Invalid input' };
+    }
+
+    const storedHash = users.get(username);
+    if (!storedHash) {
+        return { ok: false, status: 401, message: 'Invalid credentials' };
+    }
+
+    const oldHash = hashPassword(oldPassword);
+    if (oldHash !== storedHash) {
+        return { ok: false, status: 401, message: 'Invalid credentials' };
+    }
+
+    // Update password
+    const newHash = hashPassword(newPassword);
+    users.set(username, newHash);
+
+    // Invalidate all existing tokens for this user
+    invalidateTokensForUser(username);
 
     return { ok: true };
 }
@@ -90,6 +94,6 @@ function authMiddleware(req, res, next) {
 module.exports = {
     registerUser,
     loginUser,
-    authMiddleware,
-    changePassword 
+    changePassword,
+    authMiddleware
 };
