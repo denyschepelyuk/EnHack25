@@ -10,6 +10,7 @@ const { createOrder, getOrdersForWindow, findAndFillOrder } = require('./orders'
 const { getTrades, recordTrade } = require('./trades');
 const { createV2Order } = require('./orders_v2');
 
+const { registerListMyOrdersV2 } = require('./list_my_orders_v2');
 const app = express();
 
 // Health check: simple 200 OK, no GalacticBuf required here.
