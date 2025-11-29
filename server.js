@@ -486,11 +486,16 @@ app.post('/trades', authMiddleware, (req, res) => {
     const order = result.order;
     const qty = result.filledQuantity;
 
+    // include delivery window when recording trade
     const trade = recordTrade({
         buyerId: req.user,
         sellerId: order.user,
+        buyerUsername: req.user,
+        sellerUsername: order.user,
         price: order.price,
         quantity: qty,
+        delivery_start: order.deliveryStart,
+        delivery_end: order.deliveryEnd,
         timestamp: Date.now()
     });
 
@@ -583,11 +588,12 @@ app.get('/v2/my-trades', authMiddleware, (req, res) => {
         return res.status(400).send('delivery_start and delivery_end must be integers');
     }
 
-    if (delivery_start >= delivery_end) {
-        return res.status(400).send('delivery_start must be < delivery_end');
+    if (delivery_start % ONE_HOUR_MS !== 0 || delivery_end % ONE_HOUR_MS !== 0 || delivery_end <= delivery_start || delivery_end - delivery_start !== ONE_HOUR_MS) {
+        return res.status(400).send('Invalid delivery window');
     }
 
-    const userId = req.user.id;        // from authMiddleware
+    // req.user from authMiddleware is a username string (not an object)
+    const username = req.user;
 
     // Pull all trades (already sorted newest first)
     const allTrades = getTrades();
@@ -597,16 +603,16 @@ app.get('/v2/my-trades', authMiddleware, (req, res) => {
         .filter(t =>
             t.delivery_start === delivery_start &&
             t.delivery_end === delivery_end &&
-            (t.buyerId === userId || t.sellerId === userId)
+            (t.buyerId === username || t.sellerId === username)
         )
         .map(t => {
-            const isBuyer = t.buyerId === userId;
+            const isBuyer = t.buyerId === username;
             return {
                 trade_id: t.tradeId,
                 side: isBuyer ? 'buy' : 'sell',
                 price: t.price,
                 quantity: t.quantity,
-                counterparty: isBuyer ? t.sellerUsername : t.buyerUsername,
+                counterparty: isBuyer ? t.sellerId : t.buyerId,
                 delivery_start: t.delivery_start,
                 delivery_end: t.delivery_end,
                 timestamp: t.timestamp
