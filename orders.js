@@ -187,6 +187,50 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 402, message: 'Insufficient collateral' };
     }
 
+    // --- PREPARE CANDIDATES FOR MATCHING/SIMULATION ---
+    const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
+    const candidates = orders.filter(
+        (o) =>
+            o.isV2 &&
+            o.active &&
+            o.side === oppSide &&
+            o.deliveryStart === ds &&
+            o.deliveryEnd === de &&
+            o.quantity > 0
+    );
+
+    // Sort by Best Price, then FIFO
+    if (side === 'BUY') {
+        candidates.sort((a, b) => a.price - b.price || a.createdAt - b.createdAt);
+    } else {
+        candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
+    }
+
+    // -----------------------------
+    // SELF-MATCH SIMULATION
+    // Simulate the execution to see if it *actually* reaches a self-match.
+    // -----------------------------
+    let simRemaining = quantity;
+    for (const rest of candidates) {
+        if (simRemaining <= 0) break;
+
+        // Price crossing check
+        if (side === 'BUY' && price < rest.price) break;
+        if (side === 'SELL' && price > rest.price) break;
+
+        // If we reach here, we WOULD match with `rest`
+        if (rest.user === username) {
+            return { ok: false, status: 412, message: 'Self-match prevented' };
+        }
+
+        // Deduct from simulation to see if we reach the next order
+        const tq = Math.min(simRemaining, rest.quantity);
+        simRemaining -= tq;
+    }
+
+    // -----------------------------
+    // ACTUAL EXECUTION
+    // -----------------------------
     const now = Date.now();
     const incoming = {
         orderId: generateOrderId(),
@@ -206,39 +250,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
     let remaining = quantity;
     let filled = 0;
 
-    const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
-
-    // find candidates (resting opposite-side orders for same delivery window)
-    let candidates = orders.filter(
-        (o) =>
-            o.isV2 &&
-            o.active &&
-            o.side === oppSide &&
-            o.deliveryStart === ds &&
-            o.deliveryEnd === de &&
-            o.quantity > 0
-    );
-
-    if (side === 'BUY') {
-        candidates.sort((a, b) => a.price - b.price || a.createdAt - b.createdAt);
-    } else {
-        candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
-    }
-
-    // -----------------------------
-    // SELF-MATCH PREVENTION CHECK
-    // If any candidate is from the same user AND would cross in price,
-    // reject immediately with 412 Precondition Failed. No changes.
-    // -----------------------------
-    for (const rest of candidates) {
-        // crossing condition depends on side
-        const crosses = side === 'BUY' ? incoming.price >= rest.price : incoming.price <= rest.price;
-        if (crosses && rest.user === username) {
-            return { ok: false, status: 412, message: 'Self-match prevented' };
-        }
-    }
-
-    // proceed to match
     for (const rest of candidates) {
         if (remaining <= 0) break;
 
@@ -252,7 +263,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
         const buyer = side === 'BUY' ? incoming.user : rest.user;
         const seller = side === 'SELL' ? incoming.user : rest.user;
 
-        // record trade including delivery window and usernames
         recordTradeFn({
             buyerId: buyer,
             sellerId: seller,
@@ -262,7 +272,8 @@ function placeOrderV2(username, fields, recordTradeFn) {
             quantity: tq,
             delivery_start: ds,
             delivery_end: de,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            isV2: true
         });
 
         rest.quantity -= tq;

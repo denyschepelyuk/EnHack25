@@ -24,7 +24,7 @@ function recordTrade({
     quantity,
     delivery_start,
     delivery_end,
-    timestamp
+    timestamp,isV2
 }) {
     const tradeId = crypto.randomBytes(16).toString('hex');
     const ts = typeof timestamp === 'number' ? timestamp : Date.now();
@@ -39,7 +39,8 @@ function recordTrade({
         quantity,
         timestamp: ts,
         delivery_start,
-        delivery_end
+        delivery_end,
+        isV2: !!isV2
     };
 
     trades.push(trade);
