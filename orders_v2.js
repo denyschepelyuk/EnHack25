@@ -6,18 +6,6 @@ const ONE_HOUR_MS = 3600000;
 // V2 orders are completely independent from V1.
 const v2orders = [];
 
-// order object structure:
-// {
-//   orderId,
-//   user,
-//   side,              // "buy" | "sell"
-//   price,
-//   quantity,
-//   deliveryStart,
-//   deliveryEnd,
-//   status: "ACTIVE"
-// }
-
 function generateOrderId() {
     return crypto.randomBytes(16).toString('hex');
 }
@@ -83,7 +71,8 @@ function createV2Order(username, fields) {
         quantity,
         deliveryStart,
         deliveryEnd,
-        status: 'ACTIVE'
+        status: 'ACTIVE',
+        timestamp: Date.now()
     };
 
     v2orders.push(order);
@@ -91,5 +80,6 @@ function createV2Order(username, fields) {
 }
 
 module.exports = {
-    createV2Order
+    createV2Order,
+    v2orders
 };
