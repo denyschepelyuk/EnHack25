@@ -11,7 +11,8 @@ const {
     changePassword,
     authMiddleware,
     registerDnaSample,
-    loginWithDna
+    loginWithDna,
+    getUsernameFromToken     // <-- REQUIRED for bulk operations
 } = require('./auth');
 const {
     ONE_HOUR_MS,
@@ -22,9 +23,16 @@ const {
     getV2OrderBook,
     getMyActiveV2Orders,
     modifyOrderV2,
-    cancelOrderV2
+    cancelOrderV2,
+    snapshotOrders,          // <-- required
+    restoreOrders            // <-- required
 } = require('./orders');
-const { getTrades, recordTrade } = require('./trades');
+const {
+    getTrades,
+    recordTrade,
+    snapshotTrades,          // <-- required
+    restoreTrades            // <-- required
+} = require('./trades');
 
 const app = express();
 
@@ -185,7 +193,7 @@ app.get('/orders', (req, res) => {
     );
 });
 
-// POST /orders (legacy submit sell order, no matching)
+// POST /orders (legacy submit sell order)
 app.post('/orders', authMiddleware, (req, res) => {
     const body = req.galactic || {};
 
@@ -199,10 +207,7 @@ app.post('/orders', authMiddleware, (req, res) => {
 
 // -------------------- V2 ORDER BOOK & MY ORDERS --------------------
 
-// GET /v2/orders
-// Public v2 order book for a given contract
-// Query: delivery_start, delivery_end
-// Response: { bids: [...], asks: [...] }
+// GET /v2/orders (public order book)
 app.get('/v2/orders', (req, res) => {
     const qs = req.query || {};
     const deliveryStartStr = qs.delivery_start;
@@ -219,7 +224,6 @@ app.get('/v2/orders', (req, res) => {
         return res.status(400).send('delivery_start and delivery_end must be numbers');
     }
 
-    // Validate 1h aligned contract as in submit
     if (
         deliveryStart % ONE_HOUR_MS !== 0 ||
         deliveryEnd % ONE_HOUR_MS !== 0 ||
@@ -254,14 +258,12 @@ app.get('/v2/orders', (req, res) => {
 });
 
 // GET /v2/my-orders
-// Auth required.
-// Response: { orders: [...] } newest first
 app.get('/v2/my-orders', authMiddleware, (req, res) => {
     const myOrders = getMyActiveV2Orders(req.user);
 
     const orderObjects = myOrders.map((o) => ({
         order_id: o.orderId,
-        side: o.side.toLowerCase(),      // "buy" / "sell"
+        side: o.side.toLowerCase(),
         price: o.price,
         quantity: o.quantity,
         delivery_start: o.deliveryStart,
@@ -278,12 +280,9 @@ app.get('/v2/my-orders', authMiddleware, (req, res) => {
     );
 });
 
-// -------------------- V2 ORDERS (MATCHING ENGINE) --------------------
+// -------------------- V2 MATCHING ENGINE --------------------
 
 // POST /v2/orders
-// Auth required.
-// Request: { side, price, quantity, delivery_start, delivery_end }
-// Response: { order_id, status, filled_quantity }
 app.post('/v2/orders', authMiddleware, (req, res) => {
     const body = req.galactic || {};
 
@@ -306,9 +305,6 @@ app.post('/v2/orders', authMiddleware, (req, res) => {
 });
 
 // PUT /v2/orders/:orderId
-// Auth required.
-// Request: { price, quantity }
-// Response: { order_id, status, filled_quantity }
 app.put('/v2/orders/:orderId', authMiddleware, (req, res) => {
     const orderId = req.params.orderId;
     const body = req.galactic || {};
@@ -332,8 +328,6 @@ app.put('/v2/orders/:orderId', authMiddleware, (req, res) => {
 });
 
 // DELETE /v2/orders/:orderId
-// Auth required.
-// Response: 204 on success
 app.delete('/v2/orders/:orderId', authMiddleware, (req, res) => {
     const orderId = req.params.orderId;
 
@@ -345,9 +339,137 @@ app.delete('/v2/orders/:orderId', authMiddleware, (req, res) => {
     return res.status(204).end();
 });
 
+// -------------------- V2 BULK OPERATIONS --------------------
+// POST /v2/bulk-operations
+app.post('/v2/bulk-operations', (req, res) => {
+    const body = req.galactic || {};
+
+    if (!body.contracts || !Array.isArray(body.contracts)) {
+        return res.status(400).send('contracts array is required');
+    }
+
+    const ordersSnap = snapshotOrders();
+    const tradesSnap = snapshotTrades();
+
+    const results = [];
+
+    function rollback(status, msg) {
+        restoreOrders(ordersSnap);
+        restoreTrades(tradesSnap);
+        return res.status(status).send(msg);
+    }
+
+    for (const contract of body.contracts) {
+        if (!contract || typeof contract !== 'object')
+            return rollback(400, 'Invalid contract entry');
+
+        const ds = contract.delivery_start;
+        const de = contract.delivery_end;
+
+        if (!Number.isInteger(ds) || !Number.isInteger(de))
+            return rollback(400, 'delivery_start and delivery_end must be integers');
+
+        if (
+            ds % ONE_HOUR_MS !== 0 ||
+            de % ONE_HOUR_MS !== 0 ||
+            de <= ds ||
+            de - ds !== ONE_HOUR_MS
+        ) {
+            return rollback(400, 'Invalid delivery window');
+        }
+
+        const now = Date.now();
+
+        if (de <= now)
+            return rollback(451, 'Delivery window is in the past');
+
+        const THIRTY_DAYS_MS = 30 * 24 * ONE_HOUR_MS;
+        if (ds > now + THIRTY_DAYS_MS)
+            return rollback(425, 'Delivery window is too far in the future');
+
+        if (!Array.isArray(contract.operations))
+            return rollback(400, 'operations must be an array');
+
+        for (const op of contract.operations) {
+            if (!op || typeof op !== 'object' || !op.type)
+                return rollback(400, 'Invalid operation object');
+
+            const username = getUsernameFromToken(op.participant_token);
+            if (!username)
+                return rollback(401, 'Invalid participant token');
+
+            if (op.type === 'create') {
+                const { side, price, quantity, execution_type } = op;
+
+                if (!side || !Number.isInteger(price) || !Number.isInteger(quantity))
+                    return rollback(400, 'Invalid create operation fields');
+
+                const result = placeOrderV2(username, {
+                    side,
+                    price,
+                    quantity,
+                    delivery_start: ds,
+                    delivery_end: de,
+                    execution_type
+                }, recordTrade);
+
+                if (!result.ok)
+                    return rollback(result.status || 400, result.message);
+
+                results.push({
+                    type: 'create',
+                    order_id: result.order.orderId,
+                    status: result.order.status
+                });
+
+            } else if (op.type === 'modify') {
+                const { order_id, price, quantity } = op;
+
+                if (!order_id || !Number.isInteger(price) || !Number.isInteger(quantity))
+                    return rollback(400, 'Invalid modify operation fields');
+
+                const result = modifyOrderV2(username, order_id, { price, quantity }, recordTrade);
+                if (!result.ok)
+                    return rollback(result.status || 400, result.message);
+
+                results.push({
+                    type: 'modify',
+                    order_id
+                });
+
+            } else if (op.type === 'cancel') {
+                const { order_id } = op;
+
+                if (!order_id)
+                    return rollback(400, 'Invalid cancel operation fields');
+
+                const result = cancelOrderV2(username, order_id);
+                if (!result.ok)
+                    return rollback(result.status || 400, result.message);
+
+                results.push({
+                    type: 'cancel',
+                    order_id
+                });
+
+            } else {
+                return rollback(400, 'Unknown operation type: ' + op.type);
+            }
+        }
+    }
+
+    return sendGalactic(
+        res,
+        {
+            results: listOfObjects(results)
+        },
+        200
+    );
+});
+
 // -------------------- TRADES ENDPOINTS --------------------
 
-// POST /trades (manual take order, legacy)
+// POST /trades (manual take order)
 app.post('/trades', authMiddleware, (req, res) => {
     const body = req.galactic || {};
     const orderId = body.order_id;
@@ -375,7 +497,7 @@ app.post('/trades', authMiddleware, (req, res) => {
     return sendGalactic(res, { trade_id: trade.tradeId }, 200);
 });
 
-// GET /trades (public trade history)
+// GET /trades
 app.get('/trades', (req, res) => {
     const tradeList = getTrades();
 

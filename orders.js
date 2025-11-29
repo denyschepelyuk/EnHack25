@@ -168,7 +168,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
 
     const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
 
-    // Candidate resting orders in the same contract, opposite side, ACTIVE, V2 only
     let candidates = orders.filter(
         (o) =>
             o.isV2 &&
@@ -179,15 +178,12 @@ function placeOrderV2(username, fields, recordTradeFn) {
             o.quantity > 0
     );
 
-    // Price-time priority
     if (side === 'BUY') {
-        // Buy: cheapest sells first, then oldest
         candidates.sort((a, b) => {
             if (a.price !== b.price) return a.price - b.price;
             return a.createdAt - b.createdAt;
         });
     } else {
-        // Sell: highest bids first, then oldest
         candidates.sort((a, b) => {
             if (a.price !== b.price) return b.price - a.price;
             return a.createdAt - b.createdAt;
@@ -197,19 +193,16 @@ function placeOrderV2(username, fields, recordTradeFn) {
     for (const resting of candidates) {
         if (remaining <= 0) break;
 
-        // Price crossing checks
         if (side === 'BUY') {
-            // buy_price >= sell_price
             if (incomingOrder.price < resting.price) break;
         } else {
-            // side === 'SELL', sell_price <= buy_price
             if (incomingOrder.price > resting.price) break;
         }
 
         const tradeQty = Math.min(remaining, resting.quantity);
         if (tradeQty <= 0) continue;
 
-        const tradePrice = resting.price; // maker price
+        const tradePrice = resting.price;
         const buyerId = side === 'BUY' ? incomingOrder.user : resting.user;
         const sellerId = side === 'SELL' ? incomingOrder.user : resting.user;
 
@@ -221,7 +214,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
             timestamp: Date.now()
         });
 
-        // Update resting order
         resting.quantity -= tradeQty;
         if (resting.quantity <= 0) {
             resting.quantity = 0;
@@ -229,12 +221,10 @@ function placeOrderV2(username, fields, recordTradeFn) {
             resting.status = 'FILLED';
         }
 
-        // Update incoming order
         remaining -= tradeQty;
         filledQuantity += tradeQty;
     }
 
-    // Final incoming order state
     incomingOrder.quantity = remaining;
 
     if (remaining <= 0) {
@@ -243,7 +233,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
         incomingOrder.status = 'FILLED';
     }
 
-    // Only keep it in internal list if it remains active (i.e. has remaining quantity)
     if (incomingOrder.active && incomingOrder.quantity > 0) {
         orders.push(incomingOrder);
     }
@@ -257,7 +246,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
 
 // ---- V2 order book helpers ----
 
-// Returns { bids, asks } arrays of ACTIVE v2 orders for a contract
 function getV2OrderBook(deliveryStart, deliveryEnd) {
     const bids = [];
     const asks = [];
@@ -279,13 +267,11 @@ function getV2OrderBook(deliveryStart, deliveryEnd) {
         }
     }
 
-    // Bids: price descending, then time ascending
     bids.sort((a, b) => {
         if (a.price !== b.price) return b.price - a.price;
         return a.createdAt - b.createdAt;
     });
 
-    // Asks: price ascending, then time ascending
     asks.sort((a, b) => {
         if (a.price !== b.price) return a.price - b.price;
         return a.createdAt - b.createdAt;
@@ -294,7 +280,6 @@ function getV2OrderBook(deliveryStart, deliveryEnd) {
     return { bids, asks };
 }
 
-// Returns all ACTIVE v2 orders for a user across all contracts
 function getMyActiveV2Orders(username) {
     const mine = orders.filter(
         (o) =>
@@ -304,15 +289,12 @@ function getMyActiveV2Orders(username) {
             o.user === username
     );
 
-    // Newest first
     mine.sort((a, b) => b.createdAt - a.createdAt);
-
     return mine;
 }
 
 // ---- V2 modify / cancel helpers ----
 
-// Internal: find an active, modifiable V2 order by id
 function findActiveV2Order(orderId) {
     const order = orders.find((o) => o.orderId === orderId && o.isV2);
     if (!order) return null;
@@ -320,14 +302,10 @@ function findActiveV2Order(orderId) {
     return order;
 }
 
-// Modify an existing V2 order
-// fields: { price, quantity }
-// recordTradeFn: function({ buyerId, sellerId, price, quantity, timestamp })
 function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     const newPrice = fields.price;
     const newQuantity = fields.quantity;
 
-    // Both fields required
     if (newPrice === undefined || newQuantity === undefined) {
         return { ok: false, status: 400, message: 'Both price and quantity are required' };
     }
@@ -341,13 +319,11 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     }
 
     if (newQuantity <= 0) {
-        // New quantity cannot be zero or negative
         return { ok: false, status: 400, message: 'New quantity must be positive' };
     }
 
     const order = findActiveV2Order(orderId);
     if (!order) {
-        // Not found, cancelled, or fully filled
         return { ok: false, status: 404, message: 'Order not found or not modifiable' };
     }
 
@@ -359,26 +335,16 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     const oldPrice = order.price;
     const oldRemaining = order.quantity;
 
-    // Time priority rules
     let resetTimePriority = false;
     if (newPrice !== oldPrice) {
-        // Price change resets priority
         resetTimePriority = true;
     } else if (newQuantity > oldRemaining) {
-        // Quantity increase resets priority
         resetTimePriority = true;
-    } else if (newQuantity < oldRemaining) {
-        // Quantity decrease preserves priority
-        // nothing special to do
     }
 
-    // Apply modifications
     order.price = newPrice;
-
-    // Modification sets the remaining quantity
     order.quantity = newQuantity;
 
-    // If we increased remaining, it should be possible to fill more in total than originally
     if (newQuantity > oldRemaining) {
         const extra = newQuantity - oldRemaining;
         order.originalQuantity += extra;
@@ -388,7 +354,6 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         order.createdAt = now;
     }
 
-    // Run matching logic with this modified order as the taker
     const side = order.side;
     const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
     const deliveryStart = order.deliveryStart;
@@ -408,13 +373,11 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     );
 
     if (side === 'BUY') {
-        // Buy: cheapest sells first, then oldest
         candidates.sort((a, b) => {
             if (a.price !== b.price) return a.price - b.price;
             return a.createdAt - b.createdAt;
         });
     } else {
-        // Sell: highest bids first, then oldest
         candidates.sort((a, b) => {
             if (a.price !== b.price) return b.price - a.price;
             return a.createdAt - b.createdAt;
@@ -424,17 +387,16 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     for (const resting of candidates) {
         if (remaining <= 0) break;
 
-        // Price crossing checks
         if (side === 'BUY') {
-            if (order.price < resting.price) break; // buy_price >= sell_price
+            if (order.price < resting.price) break;
         } else {
-            if (order.price > resting.price) break; // sell_price <= buy_price
+            if (order.price > resting.price) break;
         }
 
         const tradeQty = Math.min(remaining, resting.quantity);
         if (tradeQty <= 0) continue;
 
-        const tradePrice = resting.price; // maker price
+        const tradePrice = resting.price;
         const buyerId = side === 'BUY' ? order.user : resting.user;
         const sellerId = side === 'SELL' ? order.user : resting.user;
 
@@ -446,7 +408,6 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
             timestamp: Date.now()
         });
 
-        // Update resting order
         resting.quantity -= tradeQty;
         if (resting.quantity <= 0) {
             resting.quantity = 0;
@@ -454,7 +415,6 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
             resting.status = 'FILLED';
         }
 
-        // Update modified order
         remaining -= tradeQty;
         filledQuantity += tradeQty;
     }
@@ -473,14 +433,12 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     };
 }
 
-// Cancel an existing V2 order
 function cancelOrderV2(username, orderId) {
     const order = orders.find((o) => o.orderId === orderId && o.isV2);
     if (!order || order.status === 'CANCELLED') {
         return { ok: false, status: 404, message: 'Order not found or already cancelled' };
     }
 
-    // Fully filled or inactive orders cannot be cancelled
     if (!order.active || order.quantity <= 0 || order.status === 'FILLED') {
         return { ok: false, status: 404, message: 'Order not cancellable' };
     }
@@ -496,6 +454,18 @@ function cancelOrderV2(username, orderId) {
     return { ok: true };
 }
 
+
+function snapshotOrders() {
+    return JSON.parse(JSON.stringify(orders));
+}
+
+function restoreOrders(snapshot) {
+    orders.length = 0;
+    for (const o of snapshot) {
+        orders.push(Object.assign({}, o));
+    }
+}
+
 module.exports = {
     ONE_HOUR_MS,
     createOrder,
@@ -505,5 +475,9 @@ module.exports = {
     getV2OrderBook,
     getMyActiveV2Orders,
     modifyOrderV2,
-    cancelOrderV2
+    cancelOrderV2,
+
+    // NEW for bulk operations
+    snapshotOrders,
+    restoreOrders
 };
