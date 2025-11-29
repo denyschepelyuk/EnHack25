@@ -108,65 +108,89 @@ function splitToCodons(dna) {
     return codons;
 }
 function isDnaSimilar(sampleDna, referenceDna, limit) {
-    const n = sampleDna.length / 3;
-    const m = referenceDna.length / 3;
+    const n = sampleDna.length / 3;  // Number of codons in sample
+    const m = referenceDna.length / 3;  // Number of codons in reference
 
+    // Early exit if length difference exceeds the allowed limit
     if (Math.abs(n - m) > limit) return false;
+
+    // If limit is 0, we only accept exact matches
     if (limit === 0) return sampleDna === referenceDna;
 
-    const S = [];
-    const T = [];
-    for (let i = 0; i < sampleDna.length; i += 3) S.push(sampleDna.substr(i, 3));
-    for (let i = 0; i < referenceDna.length; i += 3) T.push(referenceDna.substr(i, 3));
+    const sampleCodons = [];
+    const referenceCodons = [];
 
-    let prev = new Array(m + 1).fill(Infinity);
-    let curr = new Array(m + 1).fill(Infinity);
-
-    for (let j = 0; j <= m; j++) prev[j] = j;
-
-    for (let i = 1; i <= n; i++) {
-        const start = Math.max(1, i - limit);
-        const end   = Math.min(m, i + limit);
-
-        curr.fill(Infinity);
-
-        curr[0] = i;
-
-        let best = Infinity;
-
-        for (let j = start; j <= end; j++) {
-            const cost = S[i - 1] === T[j - 1] ? 0 : 1;
-
-            curr[j] = Math.min(
-                prev[j] + 1,
-                curr[j - 1] + 1,
-                prev[j - 1] + cost
-            );
-
-            if (curr[j] < best) best = curr[j];
-        }
-
-        if (best > limit) return false;
-
-        // swap
-        const tmp = prev;
-        prev = curr;
-        curr = tmp;
+    // Split both DNA samples into codons (chunks of 3 characters)
+    for (let i = 0; i < sampleDna.length; i += 3) {
+        sampleCodons.push(sampleDna.substring(i, i + 3));
+    }
+    for (let i = 0; i < referenceDna.length; i += 3) {
+        referenceCodons.push(referenceDna.substring(i, i + 3));
     }
 
-    return prev[m] <= limit;
+    // Use only two rows for the dynamic programming table to save memory
+    let prevRow = new Array(m + 1).fill(0);
+    let currRow = new Array(m + 1).fill(0);
+
+    // Initialize the first row (distance from an empty reference)
+    for (let j = 0; j <= m; j++) {
+        prevRow[j] = j;
+    }
+
+    // Fill in the dynamic programming table
+    for (let i = 1; i <= n; i++) {
+        // Calculate the valid range of j's we need to consider
+        const start = Math.max(1, i - limit);
+        const end = Math.min(m, i + limit);
+
+        // Initialize the current row with a large value (for better band management)
+        currRow[0] = i;
+
+        let minRowValue = Infinity;
+
+        for (let j = start; j <= end; j++) {
+            // Calculate the cost of substitution (0 if equal, 1 if different)
+            const cost = sampleCodons[i - 1] === referenceCodons[j - 1] ? 0 : 1;
+
+            // Compute the minimum of deletion, insertion, or substitution
+            currRow[j] = Math.min(
+                prevRow[j] + 1,       // Deletion
+                currRow[j - 1] + 1,   // Insertion
+                prevRow[j - 1] + cost // Substitution
+            );
+
+            // Track the minimum value in the current row
+            minRowValue = Math.min(minRowValue, currRow[j]);
+        }
+
+        // If the minimum value in the current row exceeds the limit, stop early
+        if (minRowValue > limit) return false;
+
+        // Swap the previous and current rows for the next iteration
+        [prevRow, currRow] = [currRow, prevRow];
+    }
+
+    // Return whether the last row's value is within the allowed limit
+    return prevRow[m] <= limit;
 }
 
 function registerDnaSample(username, password, dnaSample) {
+    // Ensure the user is registered before attempting to add a DNA sample
+    if (!users.has(username)) {
+        return { ok: false, status: 401, message: 'User does not exist' };
+    }
+
     const loginResult = loginUser(username, password);
     if (!loginResult.ok) {
         return { ok: false, status: 401, message: 'Invalid credentials' };
     }
 
+    // Validate the DNA sample
     if (!validateDnaSample(dnaSample)) {
         return { ok: false, status: 400, message: 'Invalid DNA sample' };
     }
 
+    // Register the DNA sample
     if (!usersDna.has(username)) {
         usersDna.set(username, new Set());
     }
@@ -174,6 +198,7 @@ function registerDnaSample(username, password, dnaSample) {
 
     return { ok: true };
 }
+
 
 function loginWithDna(username, submittedDna) {
     if (!username || !validateDnaSample(submittedDna)) {
