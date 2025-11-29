@@ -1,4 +1,3 @@
-// orders.js
 const crypto = require('crypto');
 
 const ONE_HOUR_MS = 3600000;

@@ -5,7 +5,6 @@ const TYPE_STRING = 0x02;
 const TYPE_LIST = 0x03;
 const TYPE_OBJECT = 0x04;
 
-// Helper "List" wrapper so we can control the element type even for empty lists
 class GalacticList {
     constructor(elementType, items) {
         this.__galactic_list = true;
@@ -190,14 +189,11 @@ function decodeMessage(buf) {
     const fieldCount = buf.readUInt8(1);
     const totalLength = buf.readUInt16BE(2);
     if (totalLength !== buf.length) {
-        // Be strict; tests are likely to expect exact match
         throw new Error('Total length in header does not match buffer length');
     }
 
     const [obj, offset] = decodeFields(fieldCount, buf, 4);
     if (offset !== buf.length) {
-        // Not necessarily fatal, but indicates malformed message
-        // We throw to be safe.
         throw new Error('Extra bytes after GalacticBuf message');
     }
     return obj;
@@ -231,7 +227,6 @@ function decodeFields(fieldCount, buf, offset) {
             }
             const big = buf.readBigInt64BE(currentOffset);
             currentOffset += 8;
-            // Convert to Number if safe, otherwise keep as BigInt
             const maxSafe = BigInt(Number.MAX_SAFE_INTEGER);
             const minSafe = BigInt(Number.MIN_SAFE_INTEGER);
             if (big <= maxSafe && big >= minSafe) {
@@ -323,7 +318,6 @@ module.exports = {
     listOfInts,
     listOfStrings,
     listOfObjects,
-    // Export constants in case you need them later
     TYPE_INT,
     TYPE_STRING,
     TYPE_LIST,

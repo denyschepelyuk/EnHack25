@@ -1,7 +1,3 @@
-// test-client.js
-// Simple local test client for the Galactic Energy Exchange server
-// Requires Node 18+ (for global fetch)
-
 const { encodeMessage, decodeMessage } = require('./galacticbuf');
 
 const BASE_URL = 'http://localhost:8080';
@@ -34,7 +30,6 @@ async function sendGalactic(method, path, bodyObj, token) {
         const nodeBuf = Buffer.from(arrayBuf);
         decoded = decodeMessage(nodeBuf);
     } else {
-        // For error messages or plain text
         decoded = await res.text();
     }
 
@@ -58,8 +53,6 @@ async function main() {
 
     console.log('POST /register -> status', reg.status, 'body:', reg.decoded);
 
-    // If you run this multiple times, you might get 409 (already exists), that’s OK.
-
     // ----------------- LOGIN -----------------
     console.log('\n--- LOGIN ---');
     const login = await sendGalactic('POST', '/login', {
@@ -80,16 +73,16 @@ async function main() {
     // ----------------- CREATE ORDER -----------------
     console.log('\n--- CREATE ORDER ---');
 
-    // Use a fixed 1-hour window: [3600000, 7200000]
-    const deliveryStart = 3600000; // 1h in ms
-    const deliveryEnd = 7200000;   // 2h in ms
+    // Use a fixed 1-hour window
+    const deliveryStart = 3600000; // 1h 
+    const deliveryEnd = 7200000;   // 2h 
 
     const createOrderRes = await sendGalactic(
         'POST',
         '/orders',
         {
-            price: 100,               // credits per unit
-            quantity: 5,              // MW
+            price: 100,        
+            quantity: 5,          
             delivery_start: deliveryStart,
             delivery_end: deliveryEnd
         },

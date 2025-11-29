@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const {
     encodeMessage,
@@ -11,12 +10,10 @@ const { getTrades, recordTrade } = require('./trades');
 
 const app = express();
 
-// Health check: simple 200 OK, no GalacticBuf required here.
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
 
-// Raw body parser for GalacticBuf
 app.use(
     express.raw({
         type: 'application/x-galacticbuf',
@@ -24,11 +21,9 @@ app.use(
     })
 );
 
-// Middleware to decode GalacticBuf requests into req.galactic
 function galacticBufParser(req, res, next) {
     const contentType = req.headers['content-type'] || '';
 
-    // Only parse for GalacticBuf content types with a body
     if (
         !contentType.startsWith('application/x-galacticbuf') ||
         !req.body ||
@@ -49,7 +44,6 @@ function galacticBufParser(req, res, next) {
 
 app.use(galacticBufParser);
 
-// Helper to send GalacticBuf responses
 function sendGalactic(res, obj, status = 200) {
     const buf = encodeMessage(obj);
     res.status(status);
@@ -137,7 +131,6 @@ app.get('/orders', (req, res) => {
         delivery_end: o.deliveryEnd
     }));
 
-    // Encode as list of objects using GalacticBuf helper
     return sendGalactic(
         res,
         {
@@ -191,7 +184,6 @@ app.post('/trades', authMiddleware, (req, res) => {
 
     const order = result.order;
 
-    // buyer is authenticated user; seller is the user who created the order
     const trade = recordTrade({
         buyerId: req.user,
         sellerId: order.user,
@@ -234,8 +226,6 @@ app.get('/trades', (req, res) => {
         200
     );
 });
-
-// -------------------- START SERVER --------------------
 
     const PORT = process.env.PORT || 8080;
 

@@ -1,4 +1,3 @@
-// auth.js
 const crypto = require('crypto');
 
 const users = new Map();   // username -> passwordHash
@@ -41,7 +40,6 @@ function loginUser(username, password) {
     return { ok: true, token };
 }
 
-// NEW: Function to change password and invalidate tokens
 function changePassword(username, oldPassword, newPassword) {
     // 1. Validate Input
     if (!username || !oldPassword || !newPassword) {
@@ -93,5 +91,5 @@ module.exports = {
     registerUser,
     loginUser,
     authMiddleware,
-    changePassword // Export the new function
+    changePassword 
 };
