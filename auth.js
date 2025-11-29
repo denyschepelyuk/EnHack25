@@ -119,45 +119,75 @@ function splitToCodons(dna) {
     return arr;
 }
 
+// Replace the existing isDnaSimilar with this implementation
 function isDnaSimilar(sample, reference, limit) {
-    // Implementation unchanged—your original version
-    const n = sample.length / 3;
-    const m = reference.length / 3;
+    // sample and reference are strings of CGAT with length divisible by 3
+    // limit is integer number of allowed codon differences
+    const sampleCodons = splitToCodons(sample);
+    const refCodons = splitToCodons(reference);
 
+    const n = sampleCodons.length;
+    const m = refCodons.length;
+
+    // Quick impossible-length check
     if (Math.abs(n - m) > limit) return false;
-    if (limit === 0) return sample === reference;
 
-    let prev = new Array(m+1);
-    let curr = new Array(m+1);
-
-    for (let j = 0; j <= m; j++) prev[j] = j;
-
-    for (let i = 1; i <= n; i++) {
-        const start = Math.max(1, i-limit);
-        const end = Math.min(m, i+limit);
-        curr[0] = i;
-
-        let minInRow = Infinity;
-
-        for (let j = start; j <= end; j++) {
-            const codS = sample.substring((i - 1) * 3, i * 3);
-            const codT = reference.substring((j - 1) * 3, j * 3);
-            const cost = codS === codT ? 0 : 1;
-
-            let left = j > start ? curr[j - 1] : curr[0];
-
-            curr[j] = Math.min(prev[j] + 1, left + 1, prev[j - 1] + cost);
-
-            if (curr[j] < minInRow) minInRow = curr[j];
-        }
-
-        if (minInRow > limit) return false;
-
-        const tmp = prev; prev = curr; curr = tmp;
+    // If limit is zero, require exact equality
+    if (limit === 0) {
+        if (n !== m) return false;
+        for (let i = 0; i < n; i++) if (sampleCodons[i] !== refCodons[i]) return false;
+        return true;
     }
 
-    return prev[m] <= limit;
+    let prev = {}; // dp for i-1
+    for (let j = 0; j <= m; j++) {
+        if (j <= limit) prev[j] = j;
+    }
+
+    for (let i = 1; i <= n; i++) {
+        const curr = {};
+        const jmin = Math.max(0, i - limit);
+        const jmax = Math.min(m, i + limit);
+
+        // dp[i][0] = i if within band
+        if (0 >= jmin && 0 <= jmax) curr[0] = i;
+
+        for (let j = jmin; j <= jmax; j++) {
+            if (j === 0 && curr[0] !== undefined) continue;
+
+            let deleteCost = Infinity;
+            let insertCost = Infinity;
+            let subCost = Infinity;
+
+            if (prev[j] !== undefined) deleteCost = prev[j] + 1;
+            if (curr[j - 1] !== undefined) insertCost = curr[j - 1] + 1;
+            if (prev[j - 1] !== undefined) {
+                const eq = sampleCodons[i - 1] === refCodons[j - 1];
+                subCost = prev[j - 1] + (eq ? 0 : 1);
+            }
+
+            // If all three are Infinity then this cell is unreachable (outside band)
+            const best = Math.min(deleteCost, insertCost, subCost);
+            if (best === Infinity) {
+                // unreachable; but we can skip setting
+            } else {
+                curr[j] = best;
+            }
+        }
+
+        let minInRow = Infinity;
+        for (const v of Object.values(curr)) if (v < minInRow) minInRow = v;
+        if (minInRow === Infinity || minInRow > limit) return false;
+
+        prev = curr;
+    }
+
+    // final value dp[n][m]
+    const finalVal = prev[m];
+    if (finalVal === undefined) return false;
+    return finalVal <= limit;
 }
+
 
 function registerDnaSample(username, password, sample) {
     const login = loginUser(username, password);
