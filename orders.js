@@ -1,25 +1,16 @@
 // orders.js
 const crypto = require('crypto');
+const { getBalance } = require('./trades');
+const { getCollateral } = require('./auth');
 
 const ONE_HOUR_MS = 3600000;
 
-// Order structure:
-// {
-//   orderId,
-//   user,
-//   side: 'BUY' | 'SELL',
-//   price,
-//   quantity,          // remaining quantity
-//   originalQuantity,  // initial quantity (may increase on modify)
-//   deliveryStart,
-//   deliveryEnd,
-//   active: boolean,
-//   status: 'ACTIVE' | 'FILLED' | 'CANCELLED',
-//   createdAt: number, // timestamp ms
-//   isV2: boolean      // true if created via /v2/orders
-// }
+// global order list
 const orders = [];
 
+/***********************************************************
+ * BASIC UTILITIES
+ ***********************************************************/
 function generateOrderId() {
     return crypto.randomBytes(16).toString('hex');
 }
@@ -52,9 +43,44 @@ function validateOrderFields(price, quantity, deliveryStart, deliveryEnd) {
     return { ok: true };
 }
 
-// ---- V1 / legacy submit order ----
 
-// Legacy endpoint /orders: submit SELL orders only, no matching.
+/***********************************************************
+ * POTENTIAL BALANCE — REQUIRED FOR COLLATERAL
+ ***********************************************************/
+function computePotentialBalance(username) {
+    let pot = getBalance(username); // current balance from trades.js
+
+    for (const o of orders) {
+        if (!o.isV2 || !o.active || o.quantity <= 0) continue;
+        if (o.user !== username) continue;
+
+        const value = o.price * o.quantity;
+
+        if (value > 0) {
+            if (o.side === 'BUY') pot -= value;   // buys reduce balance
+            else pot += value;                    // sells receive money
+        } else {
+            // negative price orders produce opposite effect
+            if (o.side === 'BUY') pot -= value;
+            else pot += value;
+        }
+    }
+
+    return pot;
+}
+
+function violatesCollateral(username) {
+    const col = getCollateral(username); // null = unlimited
+    if (col === null) return false;
+
+    const pot = computePotentialBalance(username);
+    return pot < -col;
+}
+
+
+/***********************************************************
+ * V1: createOrder, getOrdersForWindow, findAndFillOrder
+ ***********************************************************/
 function createOrder(username, fields) {
     const price = fields.price;
     const quantity = fields.quantity;
@@ -87,49 +113,41 @@ function createOrder(username, fields) {
     return { ok: true, order };
 }
 
-// For GET /orders: only active SELL orders for given contract (v1 view)
-function getOrdersForWindow(deliveryStart, deliveryEnd) {
-    const filtered = orders.filter(
+function getOrdersForWindow(start, end) {
+    const list = orders.filter(
         (o) =>
             o.active &&
             o.side === 'SELL' &&
-            o.deliveryStart === deliveryStart &&
-            o.deliveryEnd === deliveryEnd
+            o.deliveryStart === start &&
+            o.deliveryEnd === end
     );
-
-    filtered.sort((a, b) => a.price - b.price);
-    return filtered;
+    list.sort((a, b) => a.price - b.price);
+    return list;
 }
 
-// Used by manual POST /trades (take order)
 function findAndFillOrder(orderId) {
-    const order = orders.find((o) => o.orderId === orderId);
-    if (!order || !order.active) {
-        return {
-            ok: false,
-            status: 404,
-            message: 'Order not found or not active'
-        };
+    const o = orders.find((x) => x.orderId === orderId);
+    if (!o || !o.active) {
+        return { ok: false, status: 404, message: 'Order not found or inactive' };
     }
 
-    const filledQty = order.quantity;
+    const filledQty = o.quantity;
+    o.quantity = 0;
+    o.active = false;
+    o.status = 'FILLED';
 
-    order.active = false;
-    order.status = 'FILLED';
-    order.quantity = 0;
-
-    return { ok: true, order, filledQuantity: filledQty };
+    return { ok: true, order: o, filledQuantity: filledQty };
 }
 
-// ---- V2 matching engine: POST /v2/orders ----
-// fields: { side, price, quantity, delivery_start, delivery_end }
-// recordTradeFn: function({ buyerId, sellerId, price, quantity, timestamp })
+
+/***********************************************************
+ * V2: MATCHING ENGINE
+ ***********************************************************/
 function placeOrderV2(username, fields, recordTradeFn) {
     const rawSide = fields.side;
     if (!rawSide || typeof rawSide !== 'string') {
         return { ok: false, status: 400, message: 'side is required (BUY or SELL)' };
     }
-
     const side = rawSide.toUpperCase();
     if (side !== 'BUY' && side !== 'SELL') {
         return { ok: false, status: 400, message: 'side must be BUY or SELL' };
@@ -137,26 +155,43 @@ function placeOrderV2(username, fields, recordTradeFn) {
 
     const price = fields.price;
     const quantity = fields.quantity;
-    const deliveryStart = fields.delivery_start;
-    const deliveryEnd = fields.delivery_end;
+    const ds = fields.delivery_start;
+    const de = fields.delivery_end;
 
-    const validation = validateOrderFields(price, quantity, deliveryStart, deliveryEnd);
-    if (!validation.ok) {
-        return { ok: false, status: 400, message: validation.message };
+    const v = validateOrderFields(price, quantity, ds, de);
+    if (!v.ok) {
+        return { ok: false, status: 400, message: v.message };
+    }
+
+    // --- COLLATERAL CHECK BEFORE ACCEPTING ORDER ---
+    const tmp = {
+        isV2: true,
+        active: true,
+        user: username,
+        side,
+        price,
+        quantity,
+        deliveryStart: ds,
+        deliveryEnd: de
+    };
+    orders.push(tmp);
+    const violates = violatesCollateral(username);
+    orders.pop();
+
+    if (violates) {
+        return { ok: false, status: 402, message: 'Insufficient collateral' };
     }
 
     const now = Date.now();
-    const orderId = generateOrderId();
-
-    const incomingOrder = {
-        orderId,
+    const incoming = {
+        orderId: generateOrderId(),
         user: username,
         side,
         price,
         quantity,
         originalQuantity: quantity,
-        deliveryStart,
-        deliveryEnd,
+        deliveryStart: ds,
+        deliveryEnd: de,
         active: true,
         status: 'ACTIVE',
         createdAt: now,
@@ -164,320 +199,294 @@ function placeOrderV2(username, fields, recordTradeFn) {
     };
 
     let remaining = quantity;
-    let filledQuantity = 0;
+    let filled = 0;
 
-    const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
+    const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
 
     let candidates = orders.filter(
         (o) =>
             o.isV2 &&
             o.active &&
-            o.side === oppositeSide &&
-            o.deliveryStart === deliveryStart &&
-            o.deliveryEnd === deliveryEnd &&
+            o.side === oppSide &&
+            o.deliveryStart === ds &&
+            o.deliveryEnd === de &&
             o.quantity > 0
     );
 
     if (side === 'BUY') {
-        candidates.sort((a, b) => {
-            if (a.price !== b.price) return a.price - b.price;
-            return a.createdAt - b.createdAt;
-        });
+        candidates.sort((a, b) => a.price - b.price || a.createdAt - b.createdAt);
     } else {
-        candidates.sort((a, b) => {
-            if (a.price !== b.price) return b.price - a.price;
-            return a.createdAt - b.createdAt;
-        });
+        candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
-    for (const resting of candidates) {
+    for (const rest of candidates) {
         if (remaining <= 0) break;
 
-        if (side === 'BUY') {
-            if (incomingOrder.price < resting.price) break;
-        } else {
-            if (incomingOrder.price > resting.price) break;
-        }
+        if (side === 'BUY' && incoming.price < rest.price) break;
+        if (side === 'SELL' && incoming.price > rest.price) break;
 
-        const tradeQty = Math.min(remaining, resting.quantity);
-        if (tradeQty <= 0) continue;
+        const tq = Math.min(remaining, rest.quantity);
+        if (tq <= 0) continue;
 
-        const tradePrice = resting.price;
-        const buyerId = side === 'BUY' ? incomingOrder.user : resting.user;
-        const sellerId = side === 'SELL' ? incomingOrder.user : resting.user;
+        const tradePrice = rest.price;
+        const buyer = side === 'BUY' ? incoming.user : rest.user;
+        const seller = side === 'SELL' ? incoming.user : rest.user;
 
         recordTradeFn({
-            buyerId,
-            sellerId,
+            buyerId: buyer,
+            sellerId: seller,
             price: tradePrice,
-            quantity: tradeQty,
+            quantity: tq,
             timestamp: Date.now()
         });
 
-        resting.quantity -= tradeQty;
-        if (resting.quantity <= 0) {
-            resting.quantity = 0;
-            resting.active = false;
-            resting.status = 'FILLED';
+        rest.quantity -= tq;
+        if (rest.quantity <= 0) {
+            rest.quantity = 0;
+            rest.active = false;
+            rest.status = 'FILLED';
         }
 
-        remaining -= tradeQty;
-        filledQuantity += tradeQty;
+        remaining -= tq;
+        filled += tq;
     }
 
-    incomingOrder.quantity = remaining;
+    incoming.quantity = remaining;
 
     if (remaining <= 0) {
-        incomingOrder.quantity = 0;
-        incomingOrder.active = false;
-        incomingOrder.status = 'FILLED';
+        incoming.active = false;
+        incoming.status = 'FILLED';
+    } else {
+        orders.push(incoming);
     }
 
-    if (incomingOrder.active && incomingOrder.quantity > 0) {
-        orders.push(incomingOrder);
-    }
-
-    return {
-        ok: true,
-        order: incomingOrder,
-        filledQuantity
-    };
+    return { ok: true, order: incoming, filledQuantity: filled };
 }
 
-// ---- V2 order book helpers ----
 
-function getV2OrderBook(deliveryStart, deliveryEnd) {
+/***********************************************************
+ * V2 ORDER BOOK
+ ***********************************************************/
+function getV2OrderBook(ds, de) {
     const bids = [];
     const asks = [];
 
     for (const o of orders) {
-        if (
-            !o.isV2 ||
-            !o.active ||
-            o.quantity <= 0 ||
-            o.deliveryStart !== deliveryStart ||
-            o.deliveryEnd !== deliveryEnd
-        ) {
-            continue;
-        }
-        if (o.side === 'BUY') {
-            bids.push(o);
-        } else if (o.side === 'SELL') {
-            asks.push(o);
-        }
+        if (!o.isV2 || !o.active || o.quantity <= 0) continue;
+        if (o.deliveryStart !== ds || o.deliveryEnd !== de) continue;
+
+        if (o.side === 'BUY') bids.push(o);
+        else if (o.side === 'SELL') asks.push(o);
     }
 
-    bids.sort((a, b) => {
-        if (a.price !== b.price) return b.price - a.price;
-        return a.createdAt - b.createdAt;
-    });
-
-    asks.sort((a, b) => {
-        if (a.price !== b.price) return a.price - b.price;
-        return a.createdAt - b.createdAt;
-    });
+    bids.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
+    asks.sort((a, b) => a.price - b.price || a.createdAt - b.createdAt);
 
     return { bids, asks };
 }
 
 function getMyActiveV2Orders(username) {
     const mine = orders.filter(
-        (o) =>
-            o.isV2 &&
-            o.active &&
-            o.quantity > 0 &&
-            o.user === username
+        (o) => o.isV2 && o.active && o.quantity > 0 && o.user === username
     );
-
     mine.sort((a, b) => b.createdAt - a.createdAt);
     return mine;
 }
 
-// ---- V2 modify / cancel helpers ----
 
+/***********************************************************
+ * V2 MODIFY
+ ***********************************************************/
 function findActiveV2Order(orderId) {
-    const order = orders.find((o) => o.orderId === orderId && o.isV2);
-    if (!order) return null;
-    if (!order.active || order.quantity <= 0 || order.status !== 'ACTIVE') return null;
-    return order;
+    const o = orders.find((x) => x.orderId === orderId && x.isV2);
+    if (!o) return null;
+    if (!o.active || o.quantity <= 0 || o.status !== 'ACTIVE') return null;
+    return o;
 }
 
 function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     const newPrice = fields.price;
-    const newQuantity = fields.quantity;
+    const newQty = fields.quantity;
 
-    if (newPrice === undefined || newQuantity === undefined) {
-        return { ok: false, status: 400, message: 'Both price and quantity are required' };
+    if (newPrice === undefined || newQty === undefined) {
+        return { ok: false, status: 400, message: 'Both price and quantity required' };
     }
-
     if (!Number.isInteger(newPrice)) {
-        return { ok: false, status: 400, message: 'Price must be an integer' };
+        return { ok: false, status: 400, message: 'Price must be integer' };
+    }
+    if (!Number.isInteger(newQty) || newQty <= 0) {
+        return { ok: false, status: 400, message: 'Quantity must be positive' };
     }
 
-    if (!Number.isInteger(newQuantity)) {
-        return { ok: false, status: 400, message: 'Quantity must be an integer' };
-    }
-
-    if (newQuantity <= 0) {
-        return { ok: false, status: 400, message: 'New quantity must be positive' };
-    }
-
-    const order = findActiveV2Order(orderId);
-    if (!order) {
+    const o = findActiveV2Order(orderId);
+    if (!o) {
         return { ok: false, status: 404, message: 'Order not found or not modifiable' };
     }
-
-    if (order.user !== username) {
+    if (o.user !== username) {
         return { ok: false, status: 403, message: 'Cannot modify another user\'s order' };
     }
 
+    // --- COLLATERAL CHECK (simulate change) ---
+    const oldPrice = o.price;
+    const oldQ = o.quantity;
+    const oldT = o.createdAt;
+
+    o.price = newPrice;
+    o.quantity = newQty;
+
+    const violates = violatesCollateral(username);
+
+    // revert
+    o.price = oldPrice;
+    o.quantity = oldQ;
+    o.createdAt = oldT;
+
+    if (violates) {
+        return { ok: false, status: 402, message: 'Insufficient collateral' };
+    }
+
+    // APPLY REAL CHANGE
     const now = Date.now();
-    const oldPrice = order.price;
-    const oldRemaining = order.quantity;
+    let resetTP = false;
 
-    let resetTimePriority = false;
-    if (newPrice !== oldPrice) {
-        resetTimePriority = true;
-    } else if (newQuantity > oldRemaining) {
-        resetTimePriority = true;
+    if (newPrice !== oldPrice) resetTP = true;
+    if (newQty > oldQ) resetTP = true;
+
+    o.price = newPrice;
+    o.quantity = newQty;
+
+    if (newQty > o.originalQuantity) {
+        o.originalQuantity = newQty;
     }
 
-    order.price = newPrice;
-    order.quantity = newQuantity;
-
-    if (newQuantity > oldRemaining) {
-        const extra = newQuantity - oldRemaining;
-        order.originalQuantity += extra;
+    if (resetTP) {
+        o.createdAt = now;
     }
 
-    if (resetTimePriority) {
-        order.createdAt = now;
-    }
+    // RUN MATCHING
+    const side = o.side;
+    const ds = o.deliveryStart;
+    const de = o.deliveryEnd;
+    let remaining = o.quantity;
+    let filled = 0;
 
-    const side = order.side;
-    const oppositeSide = side === 'BUY' ? 'SELL' : 'BUY';
-    const deliveryStart = order.deliveryStart;
-    const deliveryEnd = order.deliveryEnd;
-
-    let remaining = order.quantity;
-    let filledQuantity = 0;
-
+    const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
     let candidates = orders.filter(
-        (o) =>
-            o.isV2 &&
-            o.active &&
-            o.side === oppositeSide &&
-            o.deliveryStart === deliveryStart &&
-            o.deliveryEnd === deliveryEnd &&
-            o.quantity > 0
+        (x) =>
+            x.isV2 &&
+            x.active &&
+            x.side === oppSide &&
+            x.deliveryStart === ds &&
+            x.deliveryEnd === de &&
+            x.quantity > 0
     );
 
     if (side === 'BUY') {
-        candidates.sort((a, b) => {
-            if (a.price !== b.price) return a.price - b.price;
-            return a.createdAt - b.createdAt;
-        });
+        candidates.sort((a, b) => a.price - b.price || a.createdAt - b.createdAt);
     } else {
-        candidates.sort((a, b) => {
-            if (a.price !== b.price) return b.price - a.price;
-            return a.createdAt - b.createdAt;
-        });
+        candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
-    for (const resting of candidates) {
+    for (const rest of candidates) {
         if (remaining <= 0) break;
 
-        if (side === 'BUY') {
-            if (order.price < resting.price) break;
-        } else {
-            if (order.price > resting.price) break;
-        }
+        if (side === 'BUY' && o.price < rest.price) break;
+        if (side === 'SELL' && o.price > rest.price) break;
 
-        const tradeQty = Math.min(remaining, resting.quantity);
-        if (tradeQty <= 0) continue;
+        const tq = Math.min(remaining, rest.quantity);
+        if (tq <= 0) continue;
 
-        const tradePrice = resting.price;
-        const buyerId = side === 'BUY' ? order.user : resting.user;
-        const sellerId = side === 'SELL' ? order.user : resting.user;
+        const tradePrice = rest.price;
+        const buyer = side === 'BUY' ? o.user : rest.user;
+        const seller = side === 'SELL' ? o.user : rest.user;
 
         recordTradeFn({
-            buyerId,
-            sellerId,
+            buyerId: buyer,
+            sellerId: seller,
             price: tradePrice,
-            quantity: tradeQty,
+            quantity: tq,
             timestamp: Date.now()
         });
 
-        resting.quantity -= tradeQty;
-        if (resting.quantity <= 0) {
-            resting.quantity = 0;
-            resting.active = false;
-            resting.status = 'FILLED';
+        rest.quantity -= tq;
+        if (rest.quantity <= 0) {
+            rest.quantity = 0;
+            rest.active = false;
+            rest.status = 'FILLED';
         }
 
-        remaining -= tradeQty;
-        filledQuantity += tradeQty;
+        remaining -= tq;
+        filled += tq;
     }
 
-    order.quantity = remaining;
+    o.quantity = remaining;
     if (remaining <= 0) {
-        order.quantity = 0;
-        order.active = false;
-        order.status = 'FILLED';
+        o.quantity = 0;
+        o.active = false;
+        o.status = 'FILLED';
     }
 
-    return {
-        ok: true,
-        order,
-        filledQuantity
-    };
+    return { ok: true, order: o, filledQuantity: filled };
 }
 
+
+/***********************************************************
+ * CANCEL ORDER
+ ***********************************************************/
 function cancelOrderV2(username, orderId) {
-    const order = orders.find((o) => o.orderId === orderId && o.isV2);
-    if (!order || order.status === 'CANCELLED') {
+    const o = orders.find((x) => x.orderId === orderId && x.isV2);
+    if (!o || o.status === 'CANCELLED') {
         return { ok: false, status: 404, message: 'Order not found or already cancelled' };
     }
-
-    if (!order.active || order.quantity <= 0 || order.status === 'FILLED') {
+    if (o.status === 'FILLED' || !o.active || o.quantity <= 0) {
         return { ok: false, status: 404, message: 'Order not cancellable' };
     }
-
-    if (order.user !== username) {
+    if (o.user !== username) {
         return { ok: false, status: 403, message: 'Cannot cancel another user\'s order' };
     }
 
-    order.active = false;
-    order.status = 'CANCELLED';
-    order.quantity = 0;
+    o.active = false;
+    o.status = 'CANCELLED';
+    o.quantity = 0;
 
     return { ok: true };
 }
 
 
+/***********************************************************
+ * SNAPSHOT / RESTORE
+ ***********************************************************/
 function snapshotOrders() {
     return JSON.parse(JSON.stringify(orders));
 }
 
 function restoreOrders(snapshot) {
     orders.length = 0;
-    for (const o of snapshot) {
-        orders.push(Object.assign({}, o));
-    }
+    for (const o of snapshot) orders.push(Object.assign({}, o));
 }
 
+
+/***********************************************************
+ * EXPORTS
+ ***********************************************************/
 module.exports = {
     ONE_HOUR_MS,
+
     createOrder,
     getOrdersForWindow,
     findAndFillOrder,
+
     placeOrderV2,
     getV2OrderBook,
     getMyActiveV2Orders,
+
     modifyOrderV2,
     cancelOrderV2,
 
-    // NEW for bulk operations
     snapshotOrders,
-    restoreOrders
+    restoreOrders,
+
+    // NEW
+    computePotentialBalance,
+    violatesCollateral
 };
