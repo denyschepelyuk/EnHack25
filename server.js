@@ -9,6 +9,7 @@ const { registerUser, loginUser, changePassword, authMiddleware } = require('./a
 const { createOrder, getOrdersForWindow, findAndFillOrder } = require('./orders');
 const { getTrades, recordTrade } = require('./trades');
 const { createV2Order } = require('./orders_v2');
+const { registerV2OrderBookRoutes } = require('./routes_v2_orders');
 
 const { registerListMyOrdersV2 } = require('./list_my_orders_v2');
 const app = express();
@@ -58,6 +59,9 @@ function sendGalactic(res, obj, status = 200) {
     res.set('Content-Type', 'application/x-galacticbuf');
     res.send(buf);
 }
+
+registerV2OrderBookRoutes(app, sendGalactic);
+
 
 // -------------------- AUTH ENDPOINTS --------------------
 
@@ -192,7 +196,7 @@ app.post('/orders', authMiddleware, (req, res) => {
     return sendGalactic(res, { order_id: result.order.orderId }, 200);
 });
 
-// -------------------- TRADES ENDPOINTS --------------------
+
 
 // POST /trades
 // Take an existing sell order.
@@ -216,7 +220,6 @@ app.post('/trades', authMiddleware, (req, res) => {
 
     const order = result.order;
 
-    // buyer is authenticated user; seller is the user who created the order
     const trade = recordTrade({
         buyerId: req.user,
         sellerId: order.user,
@@ -270,6 +273,8 @@ app.post('/v2/orders', authMiddleware, (req, res) => {
 
     return sendGalactic(res, { order_id: result.order.orderId }, 200);
 });
+
+registerListMyOrdersV2(app);
 
 // -------------------- START SERVER --------------------
 
