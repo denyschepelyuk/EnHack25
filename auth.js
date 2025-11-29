@@ -1,3 +1,4 @@
+// auth.js
 const crypto = require('crypto');
 
 const users = new Map();   // username -> passwordHash
@@ -40,6 +41,38 @@ function loginUser(username, password) {
     return { ok: true, token };
 }
 
+// NEW: Function to change password and invalidate tokens
+function changePassword(username, oldPassword, newPassword) {
+    // 1. Validate Input
+    if (!username || !oldPassword || !newPassword) {
+        return { ok: false, status: 400, message: 'Invalid input' };
+    }
+
+    // 2. Verify User and Old Password
+    const storedHash = users.get(username);
+    if (!storedHash) {
+        return { ok: false, status: 401, message: 'Invalid credentials' }; // User not found
+    }
+
+    const oldHash = hashPassword(oldPassword);
+    if (storedHash !== oldHash) {
+        return { ok: false, status: 401, message: 'Invalid credentials' }; // Wrong password
+    }
+
+    // 3. Update to New Password
+    const newHash = hashPassword(newPassword);
+    users.set(username, newHash);
+
+    // 4. Invalidate ALL existing tokens for this user
+    for (const [token, user] of tokens.entries()) {
+        if (user === username) {
+            tokens.delete(token);
+        }
+    }
+
+    return { ok: true };
+}
+
 function authMiddleware(req, res, next) {
     const header = req.headers['authorization'] || '';
     if (!header.startsWith('Bearer ')) {
@@ -59,5 +92,6 @@ function authMiddleware(req, res, next) {
 module.exports = {
     registerUser,
     loginUser,
-    authMiddleware
+    authMiddleware,
+    changePassword // Export the new function
 };
