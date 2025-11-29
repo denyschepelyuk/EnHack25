@@ -71,8 +71,7 @@ function createV2Order(username, fields) {
         quantity,
         deliveryStart,
         deliveryEnd,
-        status: 'ACTIVE',
-        timestamp: Date.now()
+        status: 'ACTIVE'
     };
 
     v2orders.push(order);
@@ -80,6 +79,5 @@ function createV2Order(username, fields) {
 }
 
 module.exports = {
-    createV2Order,
-    v2orders
+    createV2Order
 };
