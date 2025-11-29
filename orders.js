@@ -43,12 +43,11 @@ function validateOrderFields(price, quantity, deliveryStart, deliveryEnd) {
     return { ok: true };
 }
 
-
 /***********************************************************
  * POTENTIAL BALANCE — REQUIRED FOR COLLATERAL
  ***********************************************************/
 function computePotentialBalance(username) {
-    let pot = getBalance(username); // current balance from trades.js
+    let pot = getBalance(username);
 
     for (const o of orders) {
         if (!o.isV2 || !o.active || o.quantity <= 0) continue;
@@ -57,10 +56,9 @@ function computePotentialBalance(username) {
         const value = o.price * o.quantity;
 
         if (value > 0) {
-            if (o.side === 'BUY') pot -= value;   // buys reduce balance
-            else pot += value;                    // sells receive money
+            if (o.side === 'BUY') pot -= value;
+            else pot += value;
         } else {
-            // negative price orders produce opposite effect
             if (o.side === 'BUY') pot -= value;
             else pot += value;
         }
@@ -70,13 +68,12 @@ function computePotentialBalance(username) {
 }
 
 function violatesCollateral(username) {
-    const col = getCollateral(username); // null = unlimited
+    const col = getCollateral(username);
     if (col === null) return false;
 
     const pot = computePotentialBalance(username);
     return pot < -col;
 }
-
 
 /***********************************************************
  * V1: createOrder, getOrdersForWindow, findAndFillOrder
@@ -139,7 +136,6 @@ function findAndFillOrder(orderId) {
     return { ok: true, order: o, filledQuantity: filledQty };
 }
 
-
 /***********************************************************
  * V2: MATCHING ENGINE
  ***********************************************************/
@@ -163,7 +159,7 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 400, message: v.message };
     }
 
-    // --- COLLATERAL CHECK BEFORE ACCEPTING ORDER ---
+    // COLLATERAL CHECK (simulate adding it)
     const tmp = {
         isV2: true,
         active: true,
@@ -219,6 +215,19 @@ function placeOrderV2(username, fields, recordTradeFn) {
         candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
+    //------------------------------------------------------------------
+    // *** SELF-MATCH PREVENTION ***
+    //------------------------------------------------------------------
+    for (const rest of candidates) {
+        if (side === 'BUY' && incoming.price < rest.price) continue;
+        if (side === 'SELL' && incoming.price > rest.price) continue;
+        if (rest.user === username) {
+            return { ok: false, status: 412, message: 'Self-match prevented' };
+        }
+    }
+    //------------------------------------------------------------------
+
+    // NORMAL MATCHING
     for (const rest of candidates) {
         if (remaining <= 0) break;
 
@@ -263,7 +272,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
     return { ok: true, order: incoming, filledQuantity: filled };
 }
 
-
 /***********************************************************
  * V2 ORDER BOOK
  ***********************************************************/
@@ -292,7 +300,6 @@ function getMyActiveV2Orders(username) {
     mine.sort((a, b) => b.createdAt - a.createdAt);
     return mine;
 }
-
 
 /***********************************************************
  * V2 MODIFY
@@ -326,7 +333,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         return { ok: false, status: 403, message: 'Cannot modify another user\'s order' };
     }
 
-    // --- COLLATERAL CHECK (simulate change) ---
+    // COLLATERAL CHECK (simulate)
     const oldPrice = o.price;
     const oldQ = o.quantity;
     const oldT = o.createdAt;
@@ -345,7 +352,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         return { ok: false, status: 402, message: 'Insufficient collateral' };
     }
 
-    // APPLY REAL CHANGE
+    // APPLY CHANGE
     const now = Date.now();
     let resetTP = false;
 
@@ -363,7 +370,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         o.createdAt = now;
     }
 
-    // RUN MATCHING
+    // MATCHING PREP
     const side = o.side;
     const ds = o.deliveryStart;
     const de = o.deliveryEnd;
@@ -371,6 +378,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     let filled = 0;
 
     const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
+
     let candidates = orders.filter(
         (x) =>
             x.isV2 &&
@@ -387,6 +395,19 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
+    //------------------------------------------------------------------
+    // *** SELF-MATCH PREVENTION ***
+    //------------------------------------------------------------------
+    for (const rest of candidates) {
+        if (side === 'BUY' && o.price < rest.price) continue;
+        if (side === 'SELL' && o.price > rest.price) continue;
+        if (rest.user === username) {
+            return { ok: false, status: 412, message: 'Self-match prevented' };
+        }
+    }
+    //------------------------------------------------------------------
+
+    // NORMAL MATCHING
     for (const rest of candidates) {
         if (remaining <= 0) break;
 
@@ -429,7 +450,6 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     return { ok: true, order: o, filledQuantity: filled };
 }
 
-
 /***********************************************************
  * CANCEL ORDER
  ***********************************************************/
@@ -452,7 +472,6 @@ function cancelOrderV2(username, orderId) {
     return { ok: true };
 }
 
-
 /***********************************************************
  * SNAPSHOT / RESTORE
  ***********************************************************/
@@ -464,7 +483,6 @@ function restoreOrders(snapshot) {
     orders.length = 0;
     for (const o of snapshot) orders.push(Object.assign({}, o));
 }
-
 
 /***********************************************************
  * EXPORTS
@@ -486,7 +504,6 @@ module.exports = {
     snapshotOrders,
     restoreOrders,
 
-    // NEW
     computePotentialBalance,
     violatesCollateral
 };
