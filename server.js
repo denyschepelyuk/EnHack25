@@ -13,8 +13,6 @@ const { registerV2OrderBookRoutes } = require('./routes_v2_orders');
 const { registerListMyOrdersV2 } = require('./list_my_orders_v2');
 const app = express();
 
-const { registerListMyOrdersV2 } = require('./list_my_orders_v2');
-
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
