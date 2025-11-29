@@ -8,7 +8,10 @@ const AUTH_STATE_FILE = PERSISTENT_DIR ? path.join(PERSISTENT_DIR, 'auth-state.j
 
 const users = new Map();
 const tokens = new Map();
+
+// usersDna.get(username) = Map<dnaString, { codons: Uint16Array, len: number, hash: number }>
 const usersDna = new Map();
+
 const userCollateral = new Map();
 
 function loadAuthState() {
@@ -20,28 +23,31 @@ function loadAuthState() {
         const data = JSON.parse(raw);
 
         users.clear();
-        if (data.users && typeof data.users === 'object') {
-            for (const [u, hash] of Object.entries(data.users)) users.set(u, String(hash));
+        if (data.users) {
+            for (const [u, hash] of Object.entries(data.users)) users.set(u, hash);
         }
 
         usersDna.clear();
-        if (data.usersDna && typeof data.usersDna === 'object') {
+        if (data.usersDna) {
             for (const [u, arr] of Object.entries(data.usersDna)) {
-                if (Array.isArray(arr)) usersDna.set(u, new Set(arr));
+                const map = new Map();
+                for (const dna of arr) {
+                    const enc = encodeSample(dna);
+                    map.set(dna, enc);
+                }
+                usersDna.set(u, map);
             }
         }
 
         userCollateral.clear();
-        if (data.userCollateral && typeof data.userCollateral === 'object') {
+        if (data.userCollateral) {
             for (const [u, val] of Object.entries(data.userCollateral)) userCollateral.set(u, val);
         }
 
         for (const u of users.keys()) {
             if (!userCollateral.has(u)) userCollateral.set(u, null);
         }
-    } catch (err) {
-        console.error('Failed to load auth state:', err.message);
-    }
+    } catch { }
 }
 
 function saveAuthState() {
@@ -49,25 +55,25 @@ function saveAuthState() {
     try {
         const data = {
             users: Object.fromEntries(users),
-            usersDna: Object.fromEntries(Array.from(usersDna.entries()).map(([u, set]) => [u, Array.from(set)])),
+            usersDna: Object.fromEntries(
+                Array.from(usersDna.entries())
+                    .map(([u, map]) => [u, Array.from(map.keys())])
+            ),
             userCollateral: Object.fromEntries(userCollateral)
         };
         fs.mkdirSync(PERSISTENT_DIR, { recursive: true });
         fs.writeFileSync(AUTH_STATE_FILE, JSON.stringify(data));
-    } catch (err) {
-        console.error('Failed to save auth state:', err.message);
-    }
+    } catch { }
 }
 
 loadAuthState();
 
-function hashPassword(password) {
-    return crypto.createHash('sha256').update(password, 'utf8').digest('hex');
-}
+// ========= Password helpers =========
+const hashPassword = p => crypto.createHash('sha256').update(p).digest('hex');
 
 function registerUser(username, password) {
-    if (!username || !password) return { ok: false, status: 400, message: 'Invalid input' };
-    if (users.has(username)) return { ok: false, status: 409, message: 'Username already exists' };
+    if (!username || !password) return { ok: false, status: 400 };
+    if (users.has(username)) return { ok: false, status: 409 };
     users.set(username, hashPassword(password));
     userCollateral.set(username, null);
     saveAuthState();
@@ -75,160 +81,156 @@ function registerUser(username, password) {
 }
 
 function loginUser(username, password) {
-    if (!username || !password) return { ok: false, status: 401, message: 'Invalid credentials' };
-    const storedHash = users.get(username);
-    if (!storedHash) return { ok: false, status: 401, message: 'Invalid credentials' };
-    if (hashPassword(password) !== storedHash) return { ok: false, status: 401, message: 'Invalid credentials' };
+    if (!username || !password) return { ok: false, status: 401 };
+    const stored = users.get(username);
+    if (!stored) return { ok: false, status: 401 };
+    if (hashPassword(password) !== stored) return { ok: false, status: 401 };
+
     const token = crypto.randomBytes(32).toString('hex');
     tokens.set(token, username);
     return { ok: true, token };
 }
 
-function invalidateTokensForUser(username) {
-    for (const [token, user] of tokens.entries()) if (user === username) tokens.delete(token);
-}
-
-function changePassword(username, oldPassword, newPassword) {
-    if (!username || !oldPassword || !newPassword) return { ok: false, status: 400, message: 'Invalid input' };
-    const storedHash = users.get(username);
-    if (!storedHash) return { ok: false, status: 401, message: 'Invalid credentials' };
-    if (hashPassword(oldPassword) !== storedHash) return { ok: false, status: 401, message: 'Invalid credentials' };
-    users.set(username, hashPassword(newPassword));
-    invalidateTokensForUser(username);
-    saveAuthState();
-    return { ok: true };
-}
-
 function authMiddleware(req, res, next) {
-    const header = req.headers['authorization'] || '';
-    if (!header.startsWith('Bearer ')) return res.status(401).end();
-    const token = header.slice(7).trim();
+    const h = req.headers['authorization'] || '';
+    if (!h.startsWith('Bearer ')) return res.status(401).end();
+    const token = h.slice(7).trim();
     const user = tokens.get(token);
     if (!user) return res.status(401).end();
     req.user = user;
     next();
 }
 
+// ========= DNA handling =========
+
 function validateDnaSample(dna) {
     if (!dna || typeof dna !== 'string') return false;
-    if (dna.length === 0 || dna.length % 3 !== 0) return false;
+    if (dna.length % 3 !== 0) return false;
     return /^[CGAT]+$/.test(dna);
 }
 
-function codonAt(dna, idx) {
-    const start = idx * 3;
-    return dna.substr(start, 3);
+const encMap = { C:0, G:1, A:2, T:3 };
+
+function encodeSample(dna) {
+    const n = dna.length / 3;
+    const arr = new Uint16Array(n);
+    let hash = 0;
+
+    for (let i = 0, k = 0; i < dna.length; i += 3, k++) {
+        const c0 = encMap[dna[i]];
+        const c1 = encMap[dna[i+1]];
+        const c2 = encMap[dna[i+2]];
+        const code = (c0 << 4) | (c1 << 2) | c2;
+        arr[k] = code;
+        hash = (hash * 1315423911 + code) >>> 0;
+    }
+
+    return { codons: arr, len: n, hash };
 }
 
-// banded Levenshtein on codon indices; limit is small (floor(ref_codons/100000))
-function isDnaSimilar(sample, reference, limit) {
-    const n = sample.length / 3;
-    const m = reference.length / 3;
-    if (!Number.isInteger(n) || !Number.isInteger(m)) return false;
-    if (Math.abs(n - m) > limit) return false;
+// ===== fast banded DP on integer codon arrays =====
+function similarEncoded(a, b, lenA, lenB, limit) {
+    const diff = lenA - lenB;
+    if (diff < -limit || diff > limit) return false;
+
     if (limit === 0) {
-        if (n !== m) return false;
-        for (let i = 0; i < n; i++) if (codonAt(sample, i) !== codonAt(reference, i)) return false;
+        if (lenA !== lenB) return false;
+        for (let i = 0; i < lenA; i++) if (a[i] !== b[i]) return false;
         return true;
     }
 
-    // initialize prev row for i = 0: dp[0][j] = j for j in [0 .. min(m, limit)]
-    let prevJmin = 0;
-    let prevJmax = Math.min(m, limit);
-    let prev = new Array(prevJmax - prevJmin + 1);
+    let prevJmin = Math.max(0, 0 - limit);
+    let prevJmax = Math.min(lenB, limit);
+    let prev = new Int32Array(prevJmax - prevJmin + 1);
     for (let j = prevJmin; j <= prevJmax; j++) prev[j - prevJmin] = j;
 
-    for (let i = 1; i <= n; i++) {
+    for (let i = 1; i <= lenA; i++) {
         const jmin = Math.max(0, i - limit);
-        const jmax = Math.min(m, i + limit);
-        const currLen = jmax - jmin + 1;
-        const curr = new Array(currLen);
-        let minRow = Infinity;
+        const jmax = Math.min(lenB, i + limit);
+        const width = jmax - jmin + 1;
+        const curr = new Int32Array(width);
+        let rowMin = Infinity;
 
         for (let j = jmin; j <= jmax; j++) {
             const idx = j - jmin;
+
             let del = Infinity;
             let ins = Infinity;
             let sub = Infinity;
 
-            // delete: from prev[j] + 1
             if (j >= prevJmin && j <= prevJmax) del = prev[j - prevJmin] + 1;
+            if (j > jmin) ins = curr[idx - 1] + 1;
 
-            // insert: from curr[j-1] +1
-            if (j - 1 >= jmin) ins = curr[(j - 1) - jmin] + 1;
-
-            // substitution/match: from prev[j-1] + (0|1)
-            if (j - 1 >= prevJmin && j - 1 <= prevJmax) {
-                const eq = codonAt(sample, i - 1) === codonAt(reference, j - 1);
-                sub = prev[(j - 1) - prevJmin] + (eq ? 0 : 1);
+            if (j-1 >= prevJmin && j-1 <= prevJmax) {
+                const cost = (a[i-1] === b[j-1]) ? 0 : 1;
+                sub = prev[(j-1) - prevJmin] + cost;
             }
 
-            const best = Math.min(del, ins, sub);
+            const best = del < ins ? (del < sub ? del : sub) : (ins < sub ? ins : sub);
             curr[idx] = best;
-            if (best < minRow) minRow = best;
+            if (best < rowMin) rowMin = best;
         }
 
-        if (minRow > limit) return false;
+        if (rowMin > limit) return false;
         prev = curr;
         prevJmin = jmin;
         prevJmax = jmax;
     }
 
-    if (m < prevJmin || m > prevJmax) return false;
-    const finalVal = prev[m - prevJmin];
-    return finalVal <= limit;
+    if (lenB < prevJmin || lenB > prevJmax) return false;
+    return prev[lenB - prevJmin] <= limit;
 }
 
 function registerDnaSample(username, password, sample) {
-    if (!username || !password || typeof sample !== 'string') {
-        return { ok: false, status: 400, message: 'Invalid input' };
-    }
-    if (!validateDnaSample(sample)) return { ok: false, status: 400, message: 'Invalid DNA sample' };
+    if (!username || !password) return { ok:false, status:400 };
+    if (!validateDnaSample(sample)) return { ok:false, status:400 };
+
     const login = loginUser(username, password);
-    if (!login.ok) return { ok: false, status: 401, message: 'Invalid credentials' };
-    if (!usersDna.has(username)) usersDna.set(username, new Set());
-    usersDna.get(username).add(sample);
+    if (!login.ok) return { ok:false, status:401 };
+
+    if (!usersDna.has(username)) usersDna.set(username, new Map());
+    const m = usersDna.get(username);
+    if (!m.has(sample)) m.set(sample, encodeSample(sample));
+
     saveAuthState();
-    return { ok: true };
+    return { ok:true };
 }
 
 function loginWithDna(username, sample) {
-    if (!username || typeof username !== 'string' || !validateDnaSample(sample)) {
-        return { ok: false, status: 400, message: 'Invalid input' };
-    }
-    if (!users.has(username)) return { ok: false, status: 401, message: 'Authentication failed' };
-    const stored = usersDna.get(username);
-    if (!stored || stored.size === 0) return { ok: false, status: 401, message: 'Authentication failed' };
+    if (!username || !validateDnaSample(sample)) return { ok:false, status:400 };
+    if (!users.has(username)) return { ok:false, status:401 };
 
-    for (const ref of stored) {
-        const refCodons = ref.length / 3;
-        if (!Number.isInteger(refCodons)) continue;
-        const limit = Math.floor(refCodons / 100000);
-        if (isDnaSimilar(sample, ref, limit)) {
+    const map = usersDna.get(username);
+    if (!map || map.size === 0) return { ok:false, status:401 };
+
+    const enc = encodeSample(sample);
+    const a = enc.codons;
+    const lenA = enc.len;
+    const hashA = enc.hash;
+
+    for (const [raw, meta] of map.entries()) {
+        if (meta.len === lenA && meta.hash === hashA) {
             const token = crypto.randomBytes(32).toString('hex');
             tokens.set(token, username);
-            return { ok: true, token };
+            return { ok:true, token };
+        }
+
+        const limit = Math.floor(meta.len / 100000);
+        if (limit === 0) {
+            if (meta.len !== lenA) continue;
+        }
+
+        if (similarEncoded(a, meta.codons, lenA, meta.len, limit)) {
+            const t = crypto.randomBytes(32).toString('hex');
+            tokens.set(t, username);
+            return { ok:true, token: t };
         }
     }
 
-    return { ok: false, status: 401, message: 'DNA verification failed' };
+    return { ok:false, status:401 };
 }
 
-function getUsernameFromToken(token) {
-    return tokens.get(token) || null;
-}
-
-function getCollateral(username) {
-    return userCollateral.has(username) ? userCollateral.get(username) : null;
-}
-
-function setCollateral(username, value) {
-    if (!users.has(username)) return { ok: false, status: 404, message: 'User not found' };
-    userCollateral.set(username, value);
-    saveAuthState();
-    return { ok: true };
-}
-
+// ========= exports =========
 module.exports = {
     registerUser,
     loginUser,
@@ -236,11 +238,7 @@ module.exports = {
     authMiddleware,
     registerDnaSample,
     loginWithDna,
-    getUsernameFromToken,
-    getCollateral,
-    setCollateral
+    getUsernameFromToken: t => tokens.get(t) || null,
+    getCollateral: u => userCollateral.get(u),
+    setCollateral: (u,v)=>{ if(!users.has(u))return{ok:false,status:404}; userCollateral.set(u,v); saveAuthState(); return{ok:true}; }
 };
-
-//        (\ /)
-//       ( . .) ♥
-//       c(")(")
