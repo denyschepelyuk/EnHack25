@@ -519,6 +519,60 @@ app.get('/trades', (req, res) => {
     );
 });
 
+app.get('/v2/my-trades', authMiddleware, (req, res) => {
+    const qs = req.query || {};
+    const deliveryStartStr = qs.delivery_start;
+    const deliveryEndStr = qs.delivery_end;
+
+    // Required params
+    if (deliveryStartStr === undefined || deliveryEndStr === undefined) {
+        return res.status(400).send('delivery_start and delivery_end are required');
+    }
+
+    const delivery_start = Number(deliveryStartStr);
+    const delivery_end = Number(deliveryEndStr);
+
+    // Must be integers
+    if (!Number.isInteger(delivery_start) || !Number.isInteger(delivery_end)) {
+        return res.status(400).send('delivery_start and delivery_end must be integers');
+    }
+
+    const userId = req.user.id;        // from authMiddleware
+    const username = req.user.username;
+
+    // Pull all trades (already sorted newest first)
+    const allTrades = getTrades();
+
+    // Filter only user’s trades for this delivery window
+    const myTrades = allTrades
+        .filter(t =>
+            t.delivery_start === delivery_start &&
+            t.delivery_end === delivery_end &&
+            (t.buyerId === userId || t.sellerId === userId)
+        )
+        .map(t => {
+            const isBuyer = t.buyerId === userId;
+            return {
+                trade_id: t.tradeId,
+                side: isBuyer ? 'buy' : 'sell',
+                price: t.price,
+                quantity: t.quantity,
+                counterparty: isBuyer ? t.sellerUsername : t.buyerUsername,
+                delivery_start: t.delivery_start,
+                delivery_end: t.delivery_end,
+                timestamp: t.timestamp
+            };
+        });
+
+    return sendGalactic(
+        res,
+        {
+            trades: listOfObjects(myTrades)
+        },
+        200
+    );
+});
+
 // -------------------- START SERVER --------------------
 
 const PORT = process.env.PORT || 8080;
