@@ -457,4 +457,36 @@ function cancelOrderV2(username, orderId) {
  * SNAPSHOT / RESTORE
  ***********************************************************/
 function snapshotOrders() {
-    return JSON.parse(JSON.stringify(or
+    return JSON.parse(JSON.stringify(orders));
+}
+
+function restoreOrders(snapshot) {
+    orders.length = 0;
+    for (const o of snapshot) orders.push(Object.assign({}, o));
+}
+
+
+/***********************************************************
+ * EXPORTS
+ ***********************************************************/
+module.exports = {
+    ONE_HOUR_MS,
+
+    createOrder,
+    getOrdersForWindow,
+    findAndFillOrder,
+
+    placeOrderV2,
+    getV2OrderBook,
+    getMyActiveV2Orders,
+
+    modifyOrderV2,
+    cancelOrderV2,
+
+    snapshotOrders,
+    restoreOrders,
+
+    // NEW
+    computePotentialBalance,
+    violatesCollateral
+};
