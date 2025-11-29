@@ -11,6 +11,8 @@ const { createV2Order } = require('./orders_v2');
 
 const app = express();
 
+const { registerListMyOrdersV2 } = require('./list_my_orders_v2');
+
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
@@ -262,6 +264,8 @@ app.post('/v2/orders', authMiddleware, (req, res) => {
 
     return sendGalactic(res, { order_id: result.order.orderId }, 200);
 });
+
+registerListMyOrdersV2(app);
 
 // -------------------- START SERVER --------------------
 
