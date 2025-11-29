@@ -91,19 +91,77 @@ function authMiddleware(req, res, next) {
     next();
 }
 
+function validateDnaSample(dna) {
+    if (!dna || typeof dna !== 'string') return false;
+    if (dna.length % 3 !== 0) return false;
+    return /^[CGAT]+$/.test(dna);
+}
+
+function splitToCodons(dna) {
+    const codons = [];
+    for (let i = 0; i < dna.length; i += 3) {
+        codons.push(dna.substring(i, i + 3));
+    }
+    return codons;
+}
+
+function isDnaSimilar(sampleDna, referenceDna, limit) {
+    const lenDiff = Math.abs(sampleDna.length - referenceDna.length) / 3;
+    if (lenDiff > limit) return false;
+
+    if (limit === 0) return sampleDna === referenceDna;
+
+    const s = splitToCodons(sampleDna);
+    const t = splitToCodons(referenceDna);
+    
+    const n = s.length;
+    const m = t.length;
+
+    let prevRow = new Array(m + 1);
+    let currRow = new Array(m + 1);
+
+    for (let j = 0; j <= m; j++) {
+        prevRow[j] = j;
+    }
+
+    for (let i = 1; i <= n; i++) {
+        currRow[0] = i;
+        let minInRow = currRow[0]; 
+
+        for (let j = 1; j <= m; j++) {
+            const cost = s[i - 1] === t[j - 1] ? 0 : 1;
+            currRow[j] = Math.min(
+                currRow[j - 1] + 1,
+                prevRow[j] + 1,
+                prevRow[j - 1] + cost
+            );
+            
+            if (currRow[j] < minInRow) {
+                minInRow = currRow[j];
+            }
+        }
+
+        if (minInRow > limit) return false;
+
+        // Swap rows
+        const temp = prevRow;
+        prevRow = currRow;
+        currRow = temp;
+    }
+
+    return prevRow[m] <= limit;
+}
+
 function registerDnaSample(username, password, dnaSample) {
-    // 1. Authenticate user first
     const loginResult = loginUser(username, password);
     if (!loginResult.ok) {
         return { ok: false, status: 401, message: 'Invalid credentials' };
     }
 
-    // 2. Validate DNA format
     if (!validateDnaSample(dnaSample)) {
         return { ok: false, status: 400, message: 'Invalid DNA sample' };
     }
 
-    // 3. Store sample
     if (!usersDna.has(username)) {
         usersDna.set(username, new Set());
     }
@@ -113,20 +171,15 @@ function registerDnaSample(username, password, dnaSample) {
 }
 
 function loginWithDna(username, submittedDna) {
-    // 1. Basic validation
     if (!username || !validateDnaSample(submittedDna)) {
-        // Spec says 400 if invalid DNA or input
         return { ok: false, status: 400, message: 'Invalid input' };
     }
 
-    // 2. Check if user exists and has samples
     const storedSamples = usersDna.get(username);
     if (!users.has(username) || !storedSamples || storedSamples.size === 0) {
-        // Spec says 401 if user doesn't exist or no DNA registered
         return { ok: false, status: 401, message: 'Authentication failed' };
     }
 
-    // 3. Check similarity against ALL registered samples
     let matchFound = false;
 
     for (const referenceDna of storedSamples) {
@@ -143,7 +196,6 @@ function loginWithDna(username, submittedDna) {
         return { ok: false, status: 401, message: 'DNA verification failed' };
     }
 
-    // 4. Generate token
     const token = crypto.randomBytes(32).toString('hex');
     tokens.set(token, username);
     return { ok: true, token };
