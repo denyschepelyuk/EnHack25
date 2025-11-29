@@ -15,7 +15,12 @@ function applyTradeToBalances({ buyerId, sellerId, price, quantity }) {
     balances.set(sellerId, s + amount);
 }
 
-function recordTrade({ buyerId, sellerId, price, quantity, timestamp }) {
+function recordTrade({ 
+    buyerId, sellerId, buyerUsername, sellerUsername,
+    price, quantity,
+    delivery_start, delivery_end,
+    timestamp
+}) {
     const tradeId = crypto.randomBytes(16).toString('hex');
     const ts = typeof timestamp === 'number' ? timestamp : Date.now();
 
@@ -23,14 +28,17 @@ function recordTrade({ buyerId, sellerId, price, quantity, timestamp }) {
         tradeId,
         buyerId,
         sellerId,
+        buyerUsername,
+        sellerUsername,
         price,
         quantity,
-        timestamp: ts
+        timestamp: ts,
+        delivery_start,
+        delivery_end
     };
 
     trades.push(trade);
 
-    // ⬅️ NEW BALANCE EFFECT
     applyTradeToBalances({ buyerId, sellerId, price, quantity });
 
     return trade;
