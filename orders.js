@@ -1,12 +1,55 @@
 // orders.js
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { getBalance } = require('./trades');
 const { getCollateral } = require('./auth');
+
+const PERSISTENT_DIR = process.env.PERSISTENT_DIR;
+const ORDERS_STATE_FILE = PERSISTENT_DIR
+    ? path.join(PERSISTENT_DIR, 'orders-state.json')
+    : null;
 
 const ONE_HOUR_MS = 3600000;
 
 // global order list
 const orders = [];
+
+/****************************
+ * PERSISTENCE HELPERS
+ ****************************/
+function loadOrdersState() {
+    if (!ORDERS_STATE_FILE) return;
+    try {
+        if (!fs.existsSync(ORDERS_STATE_FILE)) return;
+        const raw = fs.readFileSync(ORDERS_STATE_FILE, 'utf8');
+        if (!raw) return;
+        const data = JSON.parse(raw);
+
+        orders.length = 0;
+        if (Array.isArray(data.orders)) {
+            for (const o of data.orders) {
+                orders.push(Object.assign({}, o));
+            }
+        }
+    } catch (err) {
+        console.error('Failed to load orders state:', err.message);
+    }
+}
+
+function saveOrdersState() {
+    if (!ORDERS_STATE_FILE) return;
+    try {
+        const data = { orders };
+        fs.mkdirSync(PERSISTENT_DIR, { recursive: true });
+        fs.writeFileSync(ORDERS_STATE_FILE, JSON.stringify(data));
+    } catch (err) {
+        console.error('Failed to save orders state:', err.message);
+    }
+}
+
+// Load persisted orders on module load
+loadOrdersState();
 
 /***********************************************************
  * BASIC UTILITIES
@@ -48,7 +91,7 @@ function validateOrderFields(price, quantity, deliveryStart, deliveryEnd) {
  * POTENTIAL BALANCE — REQUIRED FOR COLLATERAL
  ***********************************************************/
 function computePotentialBalance(username) {
-    let pot = getBalance(username); // current balance from trades.js
+    let pot = getBalance(username); // current balance
 
     for (const o of orders) {
         if (!o.isV2 || !o.active || o.quantity <= 0) continue;
@@ -60,7 +103,7 @@ function computePotentialBalance(username) {
             if (o.side === 'BUY') pot -= value;   // buys reduce balance
             else pot += value;                    // sells receive money
         } else {
-            // negative price orders produce opposite effect
+            // negative prices flip effect
             if (o.side === 'BUY') pot -= value;
             else pot += value;
         }
@@ -110,6 +153,8 @@ function createOrder(username, fields) {
     };
 
     orders.push(order);
+    saveOrdersState();
+
     return { ok: true, order };
 }
 
@@ -136,17 +181,14 @@ function findAndFillOrder(orderId) {
     o.active = false;
     o.status = 'FILLED';
 
+    saveOrdersState();
+
     return { ok: true, order: o, filledQuantity: filledQty };
 }
 
 
 /***********************************************************
- * V2: MATCHING ENGINE
- *
- * Implements strict self-match prevention:
- * - If an incoming submission or modification WOULD match
- *   with an existing resting order submitted by the same user,
- *   we reject immediately with status 412 and make no changes.
+ * V2: MATCHING ENGINE (with self-match prevention & collateral)
  ***********************************************************/
 function placeOrderV2(username, fields, recordTradeFn) {
     const rawSide = fields.side;
@@ -168,7 +210,7 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 400, message: v.message };
     }
 
-    // --- COLLATERAL CHECK BEFORE ACCEPTING ORDER ---
+    // --- COLLATERAL CHECK (simulate new order) ---
     const tmp = {
         isV2: true,
         active: true,
@@ -208,7 +250,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
 
     const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
 
-    // find candidates (resting opposite-side orders for same delivery window)
     let candidates = orders.filter(
         (o) =>
             o.isV2 &&
@@ -225,20 +266,17 @@ function placeOrderV2(username, fields, recordTradeFn) {
         candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
-    // -----------------------------
-    // SELF-MATCH PREVENTION CHECK
-    // If any candidate is from the same user AND would cross in price,
-    // reject immediately with 412 Precondition Failed. No changes.
-    // -----------------------------
+    // SELF-MATCH PREVENTION (before any change)
     for (const rest of candidates) {
-        // crossing condition depends on side
-        const crosses = side === 'BUY' ? incoming.price >= rest.price : incoming.price <= rest.price;
+        const crosses = side === 'BUY'
+            ? incoming.price >= rest.price
+            : incoming.price <= rest.price;
         if (crosses && rest.user === username) {
             return { ok: false, status: 412, message: 'Self-match prevented' };
         }
     }
 
-    // proceed to match
+    // Matching
     for (const rest of candidates) {
         if (remaining <= 0) break;
 
@@ -252,7 +290,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
         const buyer = side === 'BUY' ? incoming.user : rest.user;
         const seller = side === 'SELL' ? incoming.user : rest.user;
 
-        // record trade including delivery window and usernames
         recordTradeFn({
             buyerId: buyer,
             sellerId: seller,
@@ -284,6 +321,8 @@ function placeOrderV2(username, fields, recordTradeFn) {
     } else {
         orders.push(incoming);
     }
+
+    saveOrdersState();
 
     return { ok: true, order: incoming, filledQuantity: filled };
 }
@@ -321,10 +360,6 @@ function getMyActiveV2Orders(username) {
 
 /***********************************************************
  * V2 MODIFY
- *
- * When modifying we must also prevent self-matches:
- * - If modifying the order WOULD match a resting order from same user,
- *   reject with 412 and make no changes.
  ***********************************************************/
 function findActiveV2Order(orderId) {
     const o = orders.find((x) => x.orderId === orderId && x.isV2);
@@ -355,18 +390,14 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         return { ok: false, status: 403, message: 'Cannot modify another user\'s order' };
     }
 
-    // --- COLLATERAL CHECK (simulate change) ---
     const oldPrice = o.price;
     const oldQ = o.quantity;
     const oldT = o.createdAt;
 
-    // Temporarily set to simulate collateral check
+    // COLLATERAL CHECK (simulate)
     o.price = newPrice;
     o.quantity = newQty;
-
     const violates = violatesCollateral(username);
-
-    // revert
     o.price = oldPrice;
     o.quantity = oldQ;
     o.createdAt = oldT;
@@ -375,12 +406,6 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         return { ok: false, status: 402, message: 'Insufficient collateral' };
     }
 
-    // -----------------------------
-    // SELF-MATCH PREVENTION (simulation)
-    // Simulate the modified order matching against all resting opposite-side orders
-    // (excluding the order itself). If any resting order belongs to the same user
-    // and prices would cross, reject with 412.
-    // -----------------------------
     const side = o.side;
     const ds = o.deliveryStart;
     const de = o.deliveryEnd;
@@ -395,7 +420,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
             x.deliveryStart === ds &&
             x.deliveryEnd === de &&
             x.quantity > 0 &&
-            x.orderId !== orderId // exclude self
+            x.orderId !== orderId
     );
 
     if (side === 'BUY') {
@@ -404,15 +429,15 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
+    // SELF-MATCH PREVENTION
     for (const rest of candidates) {
         const crosses = side === 'BUY' ? newPrice >= rest.price : newPrice <= rest.price;
         if (crosses && rest.user === username) {
-            // do not mutate book - immediate rejection
             return { ok: false, status: 412, message: 'Self-match prevented' };
         }
     }
 
-    // APPLY REAL CHANGE
+    // APPLY CHANGE
     const now = Date.now();
     let resetTP = false;
 
@@ -430,7 +455,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         o.createdAt = now;
     }
 
-    // RUN MATCHING (this will only match against other users—self-match checks done)
+    // MATCHING
     let remaining = o.quantity;
     let filled = 0;
 
@@ -463,7 +488,6 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         const buyer = side === 'BUY' ? o.user : rest.user;
         const seller = side === 'SELL' ? o.user : rest.user;
 
-        // record trade with delivery window + usernames
         recordTradeFn({
             buyerId: buyer,
             sellerId: seller,
@@ -494,6 +518,8 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         o.status = 'FILLED';
     }
 
+    saveOrdersState();
+
     return { ok: true, order: o, filledQuantity: filled };
 }
 
@@ -517,6 +543,8 @@ function cancelOrderV2(username, orderId) {
     o.status = 'CANCELLED';
     o.quantity = 0;
 
+    saveOrdersState();
+
     return { ok: true };
 }
 
@@ -531,6 +559,7 @@ function snapshotOrders() {
 function restoreOrders(snapshot) {
     orders.length = 0;
     for (const o of snapshot) orders.push(Object.assign({}, o));
+    saveOrdersState();
 }
 
 
@@ -554,7 +583,7 @@ module.exports = {
     snapshotOrders,
     restoreOrders,
 
-    // NEW
+    // helpful for tests / collateral
     computePotentialBalance,
     violatesCollateral
 };

@@ -1,5 +1,15 @@
 // auth.js
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+
+/**
+ * PERSISTENCE SETUP
+ */
+const PERSISTENT_DIR = process.env.PERSISTENT_DIR;
+const AUTH_STATE_FILE = PERSISTENT_DIR
+    ? path.join(PERSISTENT_DIR, 'auth-state.json')
+    : null;
 
 /**
  * USERS, TOKENS, DNA
@@ -9,6 +19,74 @@ const tokens = new Map();      // token -> username
 const usersDna = new Map();    // username -> Set<dna>
 const userCollateral = new Map(); // username -> integer (max negative balance allowed, null = unlimited)
 
+/****************************
+ * PERSISTENCE HELPERS
+ ****************************/
+function loadAuthState() {
+    if (!AUTH_STATE_FILE) return;
+    try {
+        if (!fs.existsSync(AUTH_STATE_FILE)) return;
+        const raw = fs.readFileSync(AUTH_STATE_FILE, 'utf8');
+        if (!raw) return;
+        const data = JSON.parse(raw);
+
+        // users
+        users.clear();
+        if (data.users && typeof data.users === 'object') {
+            for (const [u, hash] of Object.entries(data.users)) {
+                users.set(u, String(hash));
+            }
+        }
+
+        // DNA samples
+        usersDna.clear();
+        if (data.usersDna && typeof data.usersDna === 'object') {
+            for (const [u, arr] of Object.entries(data.usersDna)) {
+                if (Array.isArray(arr)) {
+                    usersDna.set(u, new Set(arr));
+                }
+            }
+        }
+
+        // collateral
+        userCollateral.clear();
+        if (data.userCollateral && typeof data.userCollateral === 'object') {
+            for (const [u, val] of Object.entries(data.userCollateral)) {
+                // val may be null or number
+                userCollateral.set(u, val);
+            }
+        }
+
+        // ensure every known user has collateral entry
+        for (const u of users.keys()) {
+            if (!userCollateral.has(u)) {
+                userCollateral.set(u, null);
+            }
+        }
+    } catch (err) {
+        console.error('Failed to load auth state:', err.message);
+    }
+}
+
+function saveAuthState() {
+    if (!AUTH_STATE_FILE) return;
+    try {
+        const data = {
+            users: Object.fromEntries(users),
+            usersDna: Object.fromEntries(
+                Array.from(usersDna.entries()).map(([u, set]) => [u, Array.from(set)])
+            ),
+            userCollateral: Object.fromEntries(userCollateral)
+        };
+        fs.mkdirSync(PERSISTENT_DIR, { recursive: true });
+        fs.writeFileSync(AUTH_STATE_FILE, JSON.stringify(data));
+    } catch (err) {
+        console.error('Failed to save auth state:', err.message);
+    }
+}
+
+// Load existing state on startup
+loadAuthState();
 
 /****************************
  * PASSWORD HASHING
@@ -34,6 +112,8 @@ function registerUser(username, password) {
 
     // DEFAULT collateral: unlimited
     userCollateral.set(username, null);
+
+    saveAuthState();
 
     return { ok: true };
 }
@@ -84,6 +164,8 @@ function changePassword(username, oldPassword, newPassword) {
     users.set(username, hashPassword(newPassword));
     invalidateTokensForUser(username);
 
+    saveAuthState();
+
     return { ok: true };
 }
 
@@ -119,7 +201,7 @@ function splitToCodons(dna) {
     return arr;
 }
 
-// Replace the existing isDnaSimilar with this implementation
+// Your new banded Levenshtein implementation
 function isDnaSimilar(sample, reference, limit) {
     // sample and reference are strings of CGAT with length divisible by 3
     // limit is integer number of allowed codon differences
@@ -166,11 +248,8 @@ function isDnaSimilar(sample, reference, limit) {
                 subCost = prev[j - 1] + (eq ? 0 : 1);
             }
 
-            // If all three are Infinity then this cell is unreachable (outside band)
             const best = Math.min(deleteCost, insertCost, subCost);
-            if (best === Infinity) {
-                // unreachable; but we can skip setting
-            } else {
+            if (best !== Infinity) {
                 curr[j] = best;
             }
         }
@@ -182,7 +261,6 @@ function isDnaSimilar(sample, reference, limit) {
         prev = curr;
     }
 
-    // final value dp[n][m]
     const finalVal = prev[m];
     if (finalVal === undefined) return false;
     return finalVal <= limit;
@@ -204,6 +282,8 @@ function registerDnaSample(username, password, sample) {
 
     if (!usersDna.has(username)) usersDna.set(username, new Set());
     usersDna.get(username).add(sample);
+
+    saveAuthState();
 
     return { ok: true };
 }
@@ -250,6 +330,7 @@ function getCollateral(username) {
 function setCollateral(username, value) {
     if (!users.has(username)) return { ok: false, status: 404, message: 'User not found' };
     userCollateral.set(username, value);
+    saveAuthState();
     return { ok: true };
 }
 
@@ -268,7 +349,7 @@ module.exports = {
 
     getUsernameFromToken,
 
-    // NEW (required for collateral)
+    // NEW (required for collateral & persistence)
     getCollateral,
     setCollateral
 };
