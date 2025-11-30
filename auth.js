@@ -32,12 +32,23 @@ function loadAuthState() {
             }
         }
 
-        // DNA samples
+        // usersDna: previously was raw strings; new format stores objects with sig/len/fingerprint
         usersDna.clear();
         if (data.usersDna && typeof data.usersDna === 'object') {
             for (const [u, arr] of Object.entries(data.usersDna)) {
                 if (Array.isArray(arr)) {
-                    usersDna.set(u, new Set(arr));
+                    // each element should be { sig: [numbers], len: number, fingerprint: string }
+                    const normalized = [];
+                    for (const s of arr) {
+                        if (s && Array.isArray(s.sig) && Number.isInteger(s.len)) {
+                            normalized.push({
+                                sig: s.sig.map(x => Number(x) >>> 0),
+                                len: Number(s.len),
+                                fingerprint: typeof s.fingerprint === 'string' ? s.fingerprint : null
+                            });
+                        }
+                    }
+                    usersDna.set(u, normalized);
                 }
             }
         }
@@ -60,14 +71,13 @@ function loadAuthState() {
         console.error('Failed to load auth state:', err.message);
     }
 }
-
 function saveAuthState() {
     if (!AUTH_STATE_FILE) return;
     try {
         const data = {
             users: Object.fromEntries(users),
             usersDna: Object.fromEntries(
-                Array.from(usersDna.entries()).map(([u, set]) => [u, Array.from(set)])
+                Array.from(usersDna.entries()).map(([u, arr]) => [u, arr.map(s => ({ sig: s.sig, len: s.len, fingerprint: s.fingerprint }))])
             ),
             userCollateral: Object.fromEntries(userCollateral)
         };
@@ -77,6 +87,7 @@ function saveAuthState() {
         console.error('Failed to save auth state:', err.message);
     }
 }
+
 
 // Load persisted state on module load
 loadAuthState();
