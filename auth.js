@@ -1,8 +1,4 @@
-// auth.js (ULTRA-FAST VERSION)
-
-// -----------------------------------------
-// Imports
-// -----------------------------------------
+// auth.js
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -15,77 +11,6 @@ const tokens = new Map();
 const usersDna = new Map();
 const userCollateral = new Map();
 
-
-// -----------------------------------------
-// FAST DNA HELPERS
-// -----------------------------------------
-
-// Convert codon chars → small number (0–63)
-function hashCodon(c1, c2, c3) {
-    const map = { A:0, C:1, G:2, T:3 };
-    return (map[c1] << 4) | (map[c2] << 2) | map[c3];
-}
-
-// Convert raw DNA string → Uint8Array of hashed codons
-function dnaToHashedCodons(dna) {
-    const n = dna.length / 3;
-    const arr = new Uint8Array(n);
-    for (let i = 0; i < n; i++) {
-        const p = i * 3;
-        arr[i] = hashCodon(dna[p], dna[p+1], dna[p+2]);
-    }
-    return arr;
-}
-
-// Validate DNA structure quickly
-function validateDnaSample(dna) {
-    if (!dna || typeof dna !== 'string') return false;
-    if (dna.length === 0 || dna.length % 3 !== 0) return false;
-    return /^[CGAT]+$/.test(dna);
-}
-
-
-// -----------------------------------------
-// ULTRA-FAST DNA SIMILARITY — HAMMING ONLY
-// -----------------------------------------
-function isDnaSimilarHashed(sampleArr, refArr, limit) {
-    const n = sampleArr.length;
-    const m = refArr.length;
-
-    // lengths must match — spec allows re-registration for other sampler lengths
-    if (n !== m) return false;
-
-    let mismatches = 0;
-
-    // Compare 8 codons per iteration (unrolled loop)
-    const blocks = n & ~7;
-    for (let i = 0; i < blocks; i += 8) {
-        mismatches += (sampleArr[i] !== refArr[i]);
-        mismatches += (sampleArr[i+1] !== refArr[i+1]);
-        mismatches += (sampleArr[i+2] !== refArr[i+2]);
-        mismatches += (sampleArr[i+3] !== refArr[i+3]);
-        mismatches += (sampleArr[i+4] !== refArr[i+4]);
-        mismatches += (sampleArr[i+5] !== refArr[i+5]);
-        mismatches += (sampleArr[i+6] !== refArr[i+6]);
-        mismatches += (sampleArr[i+7] !== refArr[i+7]);
-
-        if (mismatches > limit) return false;
-    }
-
-    // tail
-    for (let i = blocks; i < n; i++) {
-        if (sampleArr[i] !== refArr[i]) {
-            if (++mismatches > limit) return false;
-        }
-    }
-
-    return mismatches <= limit;
-}
-
-
-// -----------------------------------------
-// State loading / saving
-// -----------------------------------------
 function loadAuthState() {
     if (!AUTH_STATE_FILE) return;
     try {
@@ -102,20 +27,13 @@ function loadAuthState() {
         usersDna.clear();
         if (data.usersDna && typeof data.usersDna === 'object') {
             for (const [u, arr] of Object.entries(data.usersDna)) {
-                if (Array.isArray(arr)) {
-                    usersDna.set(u, new Set(arr.map(encoded => {
-                        const buf = Buffer.from(encoded, 'base64');
-                        return new Uint8Array(buf);
-                    })));
-                }
+                if (Array.isArray(arr)) usersDna.set(u, new Set(arr));
             }
         }
 
         userCollateral.clear();
         if (data.userCollateral && typeof data.userCollateral === 'object') {
-            for (const [u, v] of Object.entries(data.userCollateral)) {
-                userCollateral.set(u, v);
-            }
+            for (const [u, val] of Object.entries(data.userCollateral)) userCollateral.set(u, val);
         }
 
         for (const u of users.keys()) {
@@ -131,15 +49,9 @@ function saveAuthState() {
     try {
         const data = {
             users: Object.fromEntries(users),
-            usersDna: Object.fromEntries(
-                [...usersDna.entries()].map(([u, set]) => [
-                    u,
-                    [...set].map(arr => Buffer.from(arr).toString('base64'))
-                ])
-            ),
+            usersDna: Object.fromEntries(Array.from(usersDna.entries()).map(([u, set]) => [u, Array.from(set)])),
             userCollateral: Object.fromEntries(userCollateral)
         };
-
         fs.mkdirSync(PERSISTENT_DIR, { recursive: true });
         fs.writeFileSync(AUTH_STATE_FILE, JSON.stringify(data));
     } catch (err) {
@@ -149,10 +61,6 @@ function saveAuthState() {
 
 loadAuthState();
 
-
-// -----------------------------------------
-// Auth base functions
-// -----------------------------------------
 function hashPassword(password) {
     return crypto.createHash('sha256').update(password, 'utf8').digest('hex');
 }
@@ -177,9 +85,7 @@ function loginUser(username, password) {
 }
 
 function invalidateTokensForUser(username) {
-    for (const [token, user] of tokens.entries()) {
-        if (user === username) tokens.delete(token);
-    }
+    for (const [token, user] of tokens.entries()) if (user === username) tokens.delete(token);
 }
 
 function changePassword(username, oldPassword, newPassword) {
@@ -203,26 +109,85 @@ function authMiddleware(req, res, next) {
     next();
 }
 
+function validateDnaSample(dna) {
+    if (!dna || typeof dna !== 'string') return false;
+    if (dna.length === 0 || dna.length % 3 !== 0) return false;
+    return /^[CGAT]+$/.test(dna);
+}
 
-// -----------------------------------------
-// DNA Registration and Login
-// -----------------------------------------
+function codonAt(dna, idx) {
+    const start = idx * 3;
+    return dna.substr(start, 3);
+}
+
+// banded Levenshtein on codon indices; limit is small (floor(ref_codons/100000))
+function isDnaSimilar(sample, reference, limit) {
+    const n = sample.length / 3;
+    const m = reference.length / 3;
+    if (!Number.isInteger(n) || !Number.isInteger(m)) return false;
+    if (Math.abs(n - m) > limit) return false;
+    if (limit === 0) {
+        if (n !== m) return false;
+        for (let i = 0; i < n; i++) if (codonAt(sample, i) !== codonAt(reference, i)) return false;
+        return true;
+    }
+
+    // initialize prev row for i = 0: dp[0][j] = j for j in [0 .. min(m, limit)]
+    let prevJmin = 0;
+    let prevJmax = Math.min(m, limit);
+    let prev = new Array(prevJmax - prevJmin + 1);
+    for (let j = prevJmin; j <= prevJmax; j++) prev[j - prevJmin] = j;
+
+    for (let i = 1; i <= n; i++) {
+        const jmin = Math.max(0, i - limit);
+        const jmax = Math.min(m, i + limit);
+        const currLen = jmax - jmin + 1;
+        const curr = new Array(currLen);
+        let minRow = Infinity;
+
+        for (let j = jmin; j <= jmax; j++) {
+            const idx = j - jmin;
+            let del = Infinity;
+            let ins = Infinity;
+            let sub = Infinity;
+
+            // delete: from prev[j] + 1
+            if (j >= prevJmin && j <= prevJmax) del = prev[j - prevJmin] + 1;
+
+            // insert: from curr[j-1] +1
+            if (j - 1 >= jmin) ins = curr[(j - 1) - jmin] + 1;
+
+            // substitution/match: from prev[j-1] + (0|1)
+            if (j - 1 >= prevJmin && j - 1 <= prevJmax) {
+                const eq = codonAt(sample, i - 1) === codonAt(reference, j - 1);
+                sub = prev[(j - 1) - prevJmin] + (eq ? 0 : 1);
+            }
+
+            const best = Math.min(del, ins, sub);
+            curr[idx] = best;
+            if (best < minRow) minRow = best;
+        }
+
+        if (minRow > limit) return false;
+        prev = curr;
+        prevJmin = jmin;
+        prevJmax = jmax;
+    }
+
+    if (m < prevJmin || m > prevJmax) return false;
+    const finalVal = prev[m - prevJmin];
+    return finalVal <= limit;
+}
+
 function registerDnaSample(username, password, sample) {
-    if (!username || !password || typeof sample !== 'string')
+    if (!username || !password || typeof sample !== 'string') {
         return { ok: false, status: 400, message: 'Invalid input' };
-
-    if (!validateDnaSample(sample))
-        return { ok: false, status: 400, message: 'Invalid DNA sample' };
-
+    }
+    if (!validateDnaSample(sample)) return { ok: false, status: 400, message: 'Invalid DNA sample' };
     const login = loginUser(username, password);
-    if (!login.ok)
-        return { ok: false, status: 401, message: 'Invalid credentials' };
-
-    const hashed = dnaToHashedCodons(sample);
-
+    if (!login.ok) return { ok: false, status: 401, message: 'Invalid credentials' };
     if (!usersDna.has(username)) usersDna.set(username, new Set());
-    usersDna.get(username).add(hashed);
-
+    usersDna.get(username).add(sample);
     saveAuthState();
     return { ok: true };
 }
@@ -232,19 +197,14 @@ function loginWithDna(username, sample) {
         return { ok: false, status: 400, message: 'Invalid input' };
     }
     if (!users.has(username)) return { ok: false, status: 401, message: 'Authentication failed' };
-
     const stored = usersDna.get(username);
     if (!stored || stored.size === 0) return { ok: false, status: 401, message: 'Authentication failed' };
 
-    const sampleArr = dnaToHashedCodons(sample);
-
-    for (const refArr of stored) {
-        const refCodons = refArr.length;
-
-        // mismatch tolerance (your original rule)
+    for (const ref of stored) {
+        const refCodons = ref.length / 3;
+        if (!Number.isInteger(refCodons)) continue;
         const limit = Math.floor(refCodons / 100000);
-
-        if (isDnaSimilarHashed(sampleArr, refArr, limit)) {
+        if (isDnaSimilar(sample, ref, limit)) {
             const token = crypto.randomBytes(32).toString('hex');
             tokens.set(token, username);
             return { ok: true, token };
@@ -254,10 +214,6 @@ function loginWithDna(username, sample) {
     return { ok: false, status: 401, message: 'DNA verification failed' };
 }
 
-
-// -----------------------------------------
-// Collateral
-// -----------------------------------------
 function getUsernameFromToken(token) {
     return tokens.get(token) || null;
 }
@@ -273,7 +229,6 @@ function setCollateral(username, value) {
     return { ok: true };
 }
 
-
 module.exports = {
     registerUser,
     loginUser,
@@ -286,8 +241,6 @@ module.exports = {
     setCollateral
 };
 
-
-//       (\ /)
-//      ( . .) ♥
-//      c(")(")
-
+//        (\ /)
+//       ( . .) ♥
+//       c(")(")

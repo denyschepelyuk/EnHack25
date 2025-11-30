@@ -86,6 +86,32 @@ function validateOrderFields(price, quantity, deliveryStart, deliveryEnd) {
     return { ok: true };
 }
 
+/***********************************************************
+ * TRADING WINDOW HELPER
+ ***********************************************************/
+function checkTradingWindow(deliveryStart) {
+    const now = Date.now();
+
+    // Calculate Open Time: Midnight UTC, 15 days before delivery starts
+    const d = new Date(deliveryStart);
+    d.setUTCDate(d.getUTCDate() - 15);
+    d.setUTCHours(0, 0, 0, 0);
+    const openTime = d.getTime();
+
+    // Calculate Close Time: 1 minute before delivery starts
+    const closeTime = deliveryStart - 60000;
+
+    if (now < openTime) {
+        return { ok: false, status: 425, message: 'Contract is not yet tradeable' };
+    }
+
+    if (now > closeTime) {
+        return { ok: false, status: 451, message: 'Contract is not tradeable anymore' };
+    }
+
+    return { ok: true };
+}
+
 
 /***********************************************************
  * POTENTIAL BALANCE — REQUIRED FOR COLLATERAL
@@ -208,6 +234,12 @@ function placeOrderV2(username, fields, recordTradeFn) {
     const v = validateOrderFields(price, quantity, ds, de);
     if (!v.ok) {
         return { ok: false, status: 400, message: v.message };
+    }
+
+    // --- TRADING WINDOW CHECK ---
+    const windowCheck = checkTradingWindow(ds);
+    if (!windowCheck.ok) {
+        return windowCheck; // Returns 425 or 451
     }
 
     // --- COLLATERAL CHECK (simulate new order) ---
@@ -348,6 +380,13 @@ function placeOrderV2(username, fields, recordTradeFn) {
  * V2 ORDER BOOK
  ***********************************************************/
 function getV2OrderBook(ds, de) {
+    // --- TRADING WINDOW CHECK ---
+    const windowCheck = checkTradingWindow(ds);
+    if (!windowCheck.ok) {
+        // Return empty order book if contract is not tradeable
+        return { bids: [], asks: [] };
+    }
+
     const bids = [];
     const asks = [];
 
