@@ -311,8 +311,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
     const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
     const candidates = orders.filter(
         (o) =>
-    const candidates = orders.filter(
-        (o) =>
             o.isV2 &&
             o.active &&
             o.side === oppSide &&
