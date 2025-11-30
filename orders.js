@@ -271,21 +271,18 @@ function placeOrderV2(username, fields, recordTradeFn) {
     const ds = fields.delivery_start;
     const de = fields.delivery_end;
 
+    const execType = fields.execution_type || 'GTC';
+    if (!['GTC', 'IOC', 'FOK'].includes(execType)) {
+        return { ok: false, status: 400, message: 'Invalid execution_type. Must be GTC, IOC, or FOK' };
+    }
+
     const v = validateOrderFields(price, quantity, ds, de);
     if (!v.ok) {
         return { ok: false, status: 400, message: v.message };
     }
 
-    // --- TRADING WINDOW CHECK ---
-    // --- TRADING WINDOW CHECK ---
     const windowCheck = checkTradingWindow(ds);
-    if (!windowCheck.ok) {
-        return windowCheck; // Returns 425 or 451
-    }
-    if (!windowCheck.ok) {
-        return windowCheck; // Returns 425 or 451
-    }
-
+    if (!windowCheck.ok) return windowCheck;
     // --- COLLATERAL CHECK (simulate new order) ---
     // --- COLLATERAL CHECK (simulate new order) ---
     const tmp = {
@@ -354,6 +351,26 @@ function placeOrderV2(username, fields, recordTradeFn) {
         simRemaining -= tq;
     }
 
+    if (execType === 'FOK' && simRemaining > 0) {
+        // Create a transient "CANCELLED" order object for the response
+        const killedOrder = {
+            orderId: generateOrderId(),
+            user: username,
+            side,
+            price,
+            quantity: 0, // Remainder is wiped
+            originalQuantity: quantity,
+            deliveryStart: ds,
+            deliveryEnd: de,
+            active: false,
+            status: 'CANCELLED', // FOK failed
+            createdAt: Date.now(),
+            isV2: true
+        };
+        // Do NOT save to state.
+        return { ok: true, order: killedOrder, filledQuantity: 0 };
+    }
+
     // -----------------------------
     // ACTUAL EXECUTION
     // -----------------------------
@@ -420,8 +437,19 @@ function placeOrderV2(username, fields, recordTradeFn) {
     if (remaining <= 0) {
         incoming.active = false;
         incoming.status = 'FILLED';
+        // Even if FOK/IOC, if it's fully filled, it's FILLED.
     } else {
-        orders.push(incoming);
+        // [CHANGED] Handle Remainder based on execution_type
+        if (execType === 'GTC') {
+            // Standard behavior: Add to book
+            orders.push(incoming);
+        } else {
+            // IOC or FOK (though FOK shouldn't be here if logic holds, IOC logic applies)
+            // Do NOT add to book. Mark as cancelled.
+            incoming.active = false;
+            incoming.status = 'CANCELLED';
+            incoming.quantity = 0; // Visual cleanup: the remainder is gone
+        }
     }
 
     saveOrdersState();
