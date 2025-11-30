@@ -121,7 +121,7 @@ async function main() {
             'PUT',
             `/collateral/${sellerUser}`,
             { collateral: 1_000_000 }, // 1M
-            'password123' // admin token
+            'password123' // admin token (server expects Bearer password123)
         );
         ensure(colSeller.status === 204, 'set collateral seller', {
             status: colSeller.status,
@@ -283,8 +283,14 @@ async function main() {
         const rb = await sendGalactic('GET', '/balance', null, buyerToken);
         const rs = await sendGalactic('GET', '/balance', null, sellerToken);
 
-        ensure(rb.status === 200, 'buyer /balance status', { status: rb.status, body: rb.decoded });
-        ensure(rs.status === 200, 'seller /balance status', { status: rs.status, body: rs.decoded });
+        ensure(rb.status === 200, 'buyer /balance status', {
+            status: rb.status,
+            body: rb.decoded
+        });
+        ensure(rs.status === 200, 'seller /balance status', {
+            status: rs.status,
+            body: rs.decoded
+        });
 
         console.log('Buyer balance:', rb.decoded);
         console.log('Seller balance:', rs.decoded);

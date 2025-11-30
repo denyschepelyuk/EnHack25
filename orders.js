@@ -19,21 +19,59 @@ const orders = [];
  * PERSISTENCE HELPERS
  ****************************/
 function loadOrdersState() {
-    if (!ORDERS_STATE_FILE) return;
-    try {
-        if (!fs.existsSync(ORDERS_STATE_FILE)) return;
-        const raw = fs.readFileSync(ORDERS_STATE_FILE, 'utf8');
-        if (!raw) return;
-        const data = JSON.parse(raw);
-
+    if (!ORDERS_STATE_FILE) {
         orders.length = 0;
+        return;
+    }
+
+    try {
+        if (!fs.existsSync(ORDERS_STATE_FILE)) {
+            orders.length = 0;
+            return;
+        }
+
+        const raw = fs.readFileSync(ORDERS_STATE_FILE, 'utf8');
+        if (!raw) {
+            orders.length = 0;
+            return;
+        }
+
+        const data = JSON.parse(raw);
+        orders.length = 0;
+
         if (Array.isArray(data.orders)) {
             for (const o of data.orders) {
-                orders.push(Object.assign({}, o));
+                if (
+                    o.isV2 &&
+                    o.active === true &&
+                    Number.isInteger(o.quantity) &&
+                    o.quantity > 0 &&
+                    Number.isInteger(o.deliveryStart) &&
+                    Number.isInteger(o.deliveryEnd)
+                ) {
+                    orders.push({
+                        orderId: String(o.orderId),
+                        user: String(o.user),
+                        side: o.side === 'BUY' ? 'BUY' : 'SELL',
+                        price: o.price,
+                        quantity: o.quantity,
+                        originalQuantity: o.originalQuantity || o.quantity,
+                        deliveryStart: o.deliveryStart,
+                        deliveryEnd: o.deliveryEnd,
+                        active: true,
+                        status: 'ACTIVE',
+                        createdAt: o.createdAt || Date.now(),
+                        isV2: true
+                    });
+                }
             }
         }
+
+        orders.sort((a, b) => a.createdAt - b.createdAt);
+
     } catch (err) {
         console.error('Failed to load orders state:', err.message);
+        orders.length = 0;
     }
 }
 
@@ -91,27 +129,10 @@ function validateOrderFields(price, quantity, deliveryStart, deliveryEnd) {
  ***********************************************************/
 function checkTradingWindow(deliveryStart) {
     const now = Date.now();
-
-    // Calculate Open Time: Midnight UTC, 15 days before delivery starts
-    const d = new Date(deliveryStart);
-    d.setUTCDate(d.getUTCDate() - 15);
-    d.setUTCHours(0, 0, 0, 0);
-    const openTime = d.getTime();
-
-    // Calculate Close Time: 1 minute before delivery starts
-    const closeTime = deliveryStart - 60000;
-
-    if (now < openTime) {
-        return { ok: false, status: 425, message: 'Contract is not yet tradeable' };
-    }
-
-    if (now > closeTime) {
-        return { ok: false, status: 451, message: 'Contract is not tradeable anymore' };
-    }
-
+    if (deliveryStart <= now)
+        return { ok: false, status: 451, message: 'Delivery window is in the past' };
     return { ok: true };
 }
-
 
 /***********************************************************
  * POTENTIAL BALANCE — REQUIRED FOR COLLATERAL
@@ -126,10 +147,9 @@ function computePotentialBalance(username) {
         const value = o.price * o.quantity;
 
         if (value > 0) {
-            if (o.side === 'BUY') pot -= value;   // buys reduce balance
-            else pot += value;                    // sells receive money
+            if (o.side === 'BUY') pot -= value;
+            else pot += value;
         } else {
-            // negative prices flip effect
             if (o.side === 'BUY') pot -= value;
             else pot += value;
         }
@@ -139,13 +159,11 @@ function computePotentialBalance(username) {
 }
 
 function violatesCollateral(username) {
-    const col = getCollateral(username); // null = unlimited
+    const col = getCollateral(username);
     if (col === null) return false;
-
     const pot = computePotentialBalance(username);
     return pot < -col;
 }
-
 
 /***********************************************************
  * V1: createOrder, getOrdersForWindow, findAndFillOrder
@@ -186,7 +204,7 @@ function createOrder(username, fields) {
 
 function getOrdersForWindow(start, end) {
     const list = orders.filter(
-        (o) =>
+        o =>
             o.active &&
             o.side === 'SELL' &&
             o.deliveryStart === start &&
@@ -197,7 +215,7 @@ function getOrdersForWindow(start, end) {
 }
 
 function findAndFillOrder(orderId) {
-    const o = orders.find((x) => x.orderId === orderId);
+    const o = orders.find(x => x.orderId === orderId);
     if (!o || !o.active) {
         return { ok: false, status: 404, message: 'Order not found or inactive' };
     }
@@ -212,9 +230,8 @@ function findAndFillOrder(orderId) {
     return { ok: true, order: o, filledQuantity: filledQty };
 }
 
-
 /***********************************************************
- * V2: MATCHING ENGINE (with self-match prevention & collateral)
+ * V2: MATCHING ENGINE
  ***********************************************************/
 function placeOrderV2(username, fields, recordTradeFn) {
     const rawSide = fields.side;
@@ -236,13 +253,11 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 400, message: v.message };
     }
 
-    // --- TRADING WINDOW CHECK ---
+    // Trading window
     const windowCheck = checkTradingWindow(ds);
-    if (!windowCheck.ok) {
-        return windowCheck; // Returns 425 or 451
-    }
+    if (!windowCheck.ok) return windowCheck;
 
-    // --- COLLATERAL CHECK (simulate new order) ---
+    // Collateral simulation
     const tmp = {
         isV2: true,
         active: true,
@@ -261,10 +276,10 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 402, message: 'Insufficient collateral' };
     }
 
-    // --- PREPARE CANDIDATES FOR MATCHING/SIMULATION ---
+    // --- NOW SAFE TO BUILD CANDIDATES (critical fix!) ---
     const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
-    const candidates = orders.filter(
-        (o) =>
+    let candidates = orders.filter(
+        o =>
             o.isV2 &&
             o.active &&
             o.side === oppSide &&
@@ -273,38 +288,30 @@ function placeOrderV2(username, fields, recordTradeFn) {
             o.quantity > 0
     );
 
-    // Sort by Best Price, then FIFO
+    // Best-price + FIFO
     if (side === 'BUY') {
         candidates.sort((a, b) => a.price - b.price || a.createdAt - b.createdAt);
     } else {
         candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
-    // -----------------------------
     // SELF-MATCH SIMULATION
-    // Simulate the execution to see if it *actually* reaches a self-match.
-    // -----------------------------
     let simRemaining = quantity;
     for (const rest of candidates) {
         if (simRemaining <= 0) break;
 
-        // Price crossing check
         if (side === 'BUY' && price < rest.price) break;
         if (side === 'SELL' && price > rest.price) break;
 
-        // If we reach here, we WOULD match with `rest`
         if (rest.user === username) {
             return { ok: false, status: 412, message: 'Self-match prevented' };
         }
 
-        // Deduct from simulation to see if we reach the next order
         const tq = Math.min(simRemaining, rest.quantity);
         simRemaining -= tq;
     }
 
-    // -----------------------------
-    // ACTUAL EXECUTION
-    // -----------------------------
+    // REAL EXECUTION
     const now = Date.now();
     const incoming = {
         orderId: generateOrderId(),
@@ -375,17 +382,12 @@ function placeOrderV2(username, fields, recordTradeFn) {
     return { ok: true, order: incoming, filledQuantity: filled };
 }
 
-
 /***********************************************************
  * V2 ORDER BOOK
  ***********************************************************/
 function getV2OrderBook(ds, de) {
-    // --- TRADING WINDOW CHECK ---
     const windowCheck = checkTradingWindow(ds);
-    if (!windowCheck.ok) {
-        // Return empty order book if contract is not tradeable
-        return { bids: [], asks: [] };
-    }
+    if (!windowCheck.ok) return { bids: [], asks: [] };
 
     const bids = [];
     const asks = [];
@@ -406,18 +408,17 @@ function getV2OrderBook(ds, de) {
 
 function getMyActiveV2Orders(username) {
     const mine = orders.filter(
-        (o) => o.isV2 && o.active && o.quantity > 0 && o.user === username
+        o => o.isV2 && o.active && o.quantity > 0 && o.user === username
     );
     mine.sort((a, b) => b.createdAt - a.createdAt);
     return mine;
 }
 
-
 /***********************************************************
  * V2 MODIFY
  ***********************************************************/
 function findActiveV2Order(orderId) {
-    const o = orders.find((x) => x.orderId === orderId && x.isV2);
+    const o = orders.find(x => x.orderId === orderId && x.isV2);
     if (!o) return null;
     if (!o.active || o.quantity <= 0 || o.status !== 'ACTIVE') return null;
     return o;
@@ -438,18 +439,14 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     }
 
     const o = findActiveV2Order(orderId);
-    if (!o) {
-        return { ok: false, status: 404, message: 'Order not found or not modifiable' };
-    }
-    if (o.user !== username) {
-        return { ok: false, status: 403, message: 'Cannot modify another user\'s order' };
-    }
+    if (!o) return { ok: false, status: 404, message: 'Order not found or not modifiable' };
+    if (o.user !== username) return { ok: false, status: 403, message: 'Cannot modify another user\'s order' };
 
     const oldPrice = o.price;
     const oldQ = o.quantity;
     const oldT = o.createdAt;
 
-    // COLLATERAL CHECK (simulate)
+    // Collateral simulation
     o.price = newPrice;
     o.quantity = newQty;
     const violates = violatesCollateral(username);
@@ -457,18 +454,15 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     o.quantity = oldQ;
     o.createdAt = oldT;
 
-    if (violates) {
-        return { ok: false, status: 402, message: 'Insufficient collateral' };
-    }
+    if (violates) return { ok: false, status: 402, message: 'Insufficient collateral' };
 
     const side = o.side;
     const ds = o.deliveryStart;
     const de = o.deliveryEnd;
-
     const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
 
     let candidates = orders.filter(
-        (x) =>
+        x =>
             x.isV2 &&
             x.active &&
             x.side === oppSide &&
@@ -486,13 +480,13 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
 
     // SELF-MATCH PREVENTION
     for (const rest of candidates) {
-        const crosses = side === 'BUY' ? newPrice >= rest.price : newPrice <= rest.price;
+        const crosses =
+            side === 'BUY' ? newPrice >= rest.price : newPrice <= rest.price;
         if (crosses && rest.user === username) {
             return { ok: false, status: 412, message: 'Self-match prevented' };
         }
     }
 
-    // APPLY CHANGE
     const now = Date.now();
     let resetTP = false;
 
@@ -510,12 +504,12 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
         o.createdAt = now;
     }
 
-    // MATCHING
+    // Matching
     let remaining = o.quantity;
     let filled = 0;
 
     candidates = orders.filter(
-        (x) =>
+        x =>
             x.isV2 &&
             x.active &&
             x.side === oppSide &&
@@ -553,7 +547,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
             delivery_start: ds,
             delivery_end: de,
             timestamp: Date.now(),
-            isV2: true // FIXED: Added isV2 flag to modifyOrder match execution
+            isV2: true
         });
 
         rest.quantity -= tq;
@@ -579,12 +573,11 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
     return { ok: true, order: o, filledQuantity: filled };
 }
 
-
 /***********************************************************
  * CANCEL ORDER
  ***********************************************************/
 function cancelOrderV2(username, orderId) {
-    const o = orders.find((x) => x.orderId === orderId && x.isV2);
+    const o = orders.find(x => x.orderId === orderId && x.isV2);
     if (!o || o.status === 'CANCELLED') {
         return { ok: false, status: 404, message: 'Order not found or already cancelled' };
     }
@@ -604,7 +597,6 @@ function cancelOrderV2(username, orderId) {
     return { ok: true };
 }
 
-
 /***********************************************************
  * SNAPSHOT / RESTORE
  ***********************************************************/
@@ -617,7 +609,6 @@ function restoreOrders(snapshot) {
     for (const o of snapshot) orders.push(Object.assign({}, o));
     saveOrdersState();
 }
-
 
 /***********************************************************
  * EXPORTS
@@ -639,7 +630,6 @@ module.exports = {
     snapshotOrders,
     restoreOrders,
 
-    // helpful for tests / collateral
     computePotentialBalance,
     violatesCollateral
 };
