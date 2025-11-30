@@ -41,46 +41,33 @@ function loadOrdersState() {
 
         if (Array.isArray(data.orders)) {
             for (const o of data.orders) {
-                if (
-                    o.isV2 &&
-                    o.active === true &&
-                    Number.isInteger(o.quantity) &&
-                    o.quantity > 0 &&
-                    Number.isInteger(o.deliveryStart) &&
-                    Number.isInteger(o.deliveryEnd)
-                ) {
-                    orders.push({
-                        orderId: String(o.orderId),
-                        user: String(o.user),
-                        side: o.side === 'BUY' ? 'BUY' : 'SELL',
-                        price: o.price,
-                        quantity: o.quantity,
-                        originalQuantity: o.originalQuantity || o.quantity,
-                        deliveryStart: o.deliveryStart,
-                        deliveryEnd: o.deliveryEnd,
-                        active: true,
-                        status: 'ACTIVE',
-                        createdAt: o.createdAt || Date.now(),
-                        isV2: true
-                    });
-                }
+                // Only restore V2 orders; V1 state can reset on restart
+                if (!o.isV2) continue;
+
+                // Basic sanity checks
+                if (!Number.isInteger(o.quantity) || o.quantity < 0) continue;
+                if (!Number.isInteger(o.deliveryStart) || !Number.isInteger(o.deliveryEnd)) continue;
+
+                // Shallow copy to avoid sharing references
+                orders.push({ ...o });
             }
         }
 
-        orders.sort((a, b) => a.createdAt - b.createdAt);
+        // Preserve FIFO priority based on createdAt
+        orders.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
 
     } catch (err) {
         console.error('Failed to load orders state:', err.message);
-
         orders.length = 0;
     }
 }
 
-
 function saveOrdersState() {
     if (!ORDERS_STATE_FILE) return;
     try {
-        const data = { orders };
+        // Only persist V2 orders (V1 can reset)
+        const v2Orders = orders.filter(o => o.isV2);
+        const data = { orders: v2Orders };
         fs.mkdirSync(PERSISTENT_DIR, { recursive: true });
         fs.writeFileSync(ORDERS_STATE_FILE, JSON.stringify(data));
     } catch (err) {
@@ -219,6 +206,7 @@ function createOrder(username, fields) {
     };
 
     orders.push(order);
+    // V1 state does not need to persist, but persisting is harmless
     saveOrdersState();
 
     return { ok: true, order };
@@ -271,16 +259,18 @@ function placeOrderV2(username, fields, recordTradeFn) {
     const ds = fields.delivery_start;
     const de = fields.delivery_end;
 
+    const execType = fields.execution_type || 'GTC';
+    if (!['GTC', 'IOC', 'FOK'].includes(execType)) {
+        return { ok: false, status: 400, message: 'Invalid execution_type. Must be GTC, IOC, or FOK' };
+    }
+
     const v = validateOrderFields(price, quantity, ds, de);
     if (!v.ok) {
         return { ok: false, status: 400, message: v.message };
     }
 
-    // --- TRADING WINDOW CHECK ---
     const windowCheck = checkTradingWindow(ds);
-    if (!windowCheck.ok) {
-        return windowCheck; // Returns 425 or 451
-    }
+    if (!windowCheck.ok) return windowCheck;
 
     // --- COLLATERAL CHECK (simulate new order) ---
     const tmp = {
@@ -320,10 +310,7 @@ function placeOrderV2(username, fields, recordTradeFn) {
         candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
-    // -----------------------------
     // SELF-MATCH SIMULATION
-    // Simulate the execution to see if it *actually* reaches a self-match.
-    // -----------------------------
     let simRemaining = quantity;
     for (const rest of candidates) {
         if (simRemaining <= 0) break;
@@ -332,7 +319,7 @@ function placeOrderV2(username, fields, recordTradeFn) {
         if (side === 'BUY' && price < rest.price) break;
         if (side === 'SELL' && price > rest.price) break;
 
-        // If we reach here, we WOULD match with `rest`
+        // If we reach here, we WOULD match with rest
         if (rest.user === username) {
             return { ok: false, status: 412, message: 'Self-match prevented' };
         }
@@ -340,6 +327,27 @@ function placeOrderV2(username, fields, recordTradeFn) {
         // Deduct from simulation to see if we reach the next order
         const tq = Math.min(simRemaining, rest.quantity);
         simRemaining -= tq;
+    }
+
+    if (execType === 'FOK' && simRemaining > 0) {
+        // Create a transient "CANCELLED" order object for the response
+        const killedOrder = {
+            orderId: generateOrderId(),
+            user: username,
+            side,
+            price,
+            quantity: 0, // Remainder is wiped
+            originalQuantity: quantity,
+            deliveryStart: ds,
+            deliveryEnd: de,
+            active: false,
+            status: 'CANCELLED', // FOK failed
+            createdAt: Date.now(),
+            isV2: true,
+            execution_type: execType
+        };
+        // Do NOT save to state.
+        return { ok: true, order: killedOrder, filledQuantity: 0 };
     }
 
     // -----------------------------
@@ -358,7 +366,8 @@ function placeOrderV2(username, fields, recordTradeFn) {
         active: true,
         status: 'ACTIVE',
         createdAt: now,
-        isV2: true
+        isV2: true,
+        execution_type: execType
     };
 
     let remaining = quantity;
@@ -376,7 +385,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
         const tradePrice = rest.price;
         const buyer = side === 'BUY' ? incoming.user : rest.user;
         const seller = side === 'SELL' ? incoming.user : rest.user;
-
         recordTradeFn({
             buyerId: buyer,
             sellerId: seller,
@@ -406,8 +414,19 @@ function placeOrderV2(username, fields, recordTradeFn) {
     if (remaining <= 0) {
         incoming.active = false;
         incoming.status = 'FILLED';
+        // Even if FOK/IOC, if it's fully filled, it's FILLED.
     } else {
-        orders.push(incoming);
+        // Handle remainder based on execution_type
+        if (execType === 'GTC') {
+            // Standard behavior: Add to book
+            orders.push(incoming);
+        } else {
+            // IOC or FOK (though FOK shouldn't be here if logic holds, IOC logic applies)
+            // Do NOT add to book. Mark as cancelled.
+            incoming.active = false;
+            incoming.status = 'CANCELLED';
+            incoming.quantity = 0; // Remainder is gone
+        }
     }
 
     saveOrdersState();
@@ -593,7 +612,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
             delivery_start: ds,
             delivery_end: de,
             timestamp: Date.now(),
-            isV2: true // FIXED: Added isV2 flag to modifyOrder match execution
+            isV2: true
         });
 
         rest.quantity -= tq;
