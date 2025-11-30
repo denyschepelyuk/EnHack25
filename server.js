@@ -679,6 +679,31 @@ app.get('/v2/my-trades', authMiddleware, (req, res) => {
     );
 });
 
+
+app.post('/v2/orders', authMiddleware, (req, res) => {
+    const body = req.galactic || {};
+
+    // [CHANGED] Pass execution_type explicitly or let placeOrderV2 extract it from body
+    // Ideally, we pass the whole body merged with overrides, or just the body
+    // The previous code passed 'body', we continue that, but ensure we document that execution_type is inside body.
+    
+    const result = placeOrderV2(req.user, body, recordTrade);
+    if (!result.ok) {
+        return res.status(result.status).send(result.message);
+    }
+
+    const order = result.order;
+
+    return sendGalactic(
+        res,
+        {
+            order_id: order.orderId,
+            status: order.status,
+            filled_quantity: result.filledQuantity
+        },
+        200
+    );
+});
 // -------------------- START SERVER --------------------
 
 const PORT = process.env.PORT || 8080;

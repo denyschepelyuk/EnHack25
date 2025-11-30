@@ -253,11 +253,13 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 400, message: v.message };
     }
 
-    // Trading window
+    // --- TRADING WINDOW CHECK ---
     const windowCheck = checkTradingWindow(ds);
-    if (!windowCheck.ok) return windowCheck;
+    if (!windowCheck.ok) {
+        return windowCheck; // Returns 425 or 451
+    }
 
-    // Collateral simulation
+    // --- COLLATERAL CHECK (simulate new order) ---
     const tmp = {
         isV2: true,
         active: true,
@@ -276,10 +278,10 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 402, message: 'Insufficient collateral' };
     }
 
-    // --- NOW SAFE TO BUILD CANDIDATES (critical fix!) ---
+    // --- PREPARE CANDIDATES FOR MATCHING/SIMULATION ---
     const oppSide = side === 'BUY' ? 'SELL' : 'BUY';
-    let candidates = orders.filter(
-        o =>
+    const candidates = orders.filter(
+        (o) =>
             o.isV2 &&
             o.active &&
             o.side === oppSide &&
@@ -288,30 +290,38 @@ function placeOrderV2(username, fields, recordTradeFn) {
             o.quantity > 0
     );
 
-    // Best-price + FIFO
+    // Sort by Best Price, then FIFO
     if (side === 'BUY') {
         candidates.sort((a, b) => a.price - b.price || a.createdAt - b.createdAt);
     } else {
         candidates.sort((a, b) => b.price - a.price || a.createdAt - b.createdAt);
     }
 
+    // -----------------------------
     // SELF-MATCH SIMULATION
+    // Simulate the execution to see if it *actually* reaches a self-match.
+    // -----------------------------
     let simRemaining = quantity;
     for (const rest of candidates) {
         if (simRemaining <= 0) break;
 
+        // Price crossing check
         if (side === 'BUY' && price < rest.price) break;
         if (side === 'SELL' && price > rest.price) break;
 
+        // If we reach here, we WOULD match with rest
         if (rest.user === username) {
             return { ok: false, status: 412, message: 'Self-match prevented' };
         }
 
+        // Deduct from simulation to see if we reach the next order
         const tq = Math.min(simRemaining, rest.quantity);
         simRemaining -= tq;
     }
 
-    // REAL EXECUTION
+    // -----------------------------
+    // ACTUAL EXECUTION
+    // -----------------------------
     const now = Date.now();
     const incoming = {
         orderId: generateOrderId(),
@@ -343,7 +353,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
         const tradePrice = rest.price;
         const buyer = side === 'BUY' ? incoming.user : rest.user;
         const seller = side === 'SELL' ? incoming.user : rest.user;
-
         recordTradeFn({
             buyerId: buyer,
             sellerId: seller,
@@ -381,7 +390,6 @@ function placeOrderV2(username, fields, recordTradeFn) {
 
     return { ok: true, order: incoming, filledQuantity: filled };
 }
-
 /***********************************************************
  * V2 ORDER BOOK
  ***********************************************************/
