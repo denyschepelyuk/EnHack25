@@ -154,7 +154,7 @@ function checkTradingWindow(deliveryStart) {
 
 
 /***********************************************************
- * POTENTIAL BALANCE — REQUIRED FOR COLLATERAL
+ * POTENTIAL BALANCE – REQUIRED FOR COLLATERAL
  ***********************************************************/
 function computePotentialBalance(username) {
     let pot = getBalance(username); // current balance
@@ -266,6 +266,20 @@ function placeOrderV2(username, fields, recordTradeFn) {
         return { ok: false, status: 400, message: 'side must be BUY or SELL' };
     }
 
+    // Validate execution_type
+    const rawExecutionType = fields.execution_type;
+    let executionType = 'GTC'; // default
+    if (rawExecutionType !== undefined) {
+        if (typeof rawExecutionType !== 'string') {
+            return { ok: false, status: 400, message: 'execution_type must be a string' };
+        }
+        const normalized = rawExecutionType.toUpperCase();
+        if (normalized !== 'GTC' && normalized !== 'IOC' && normalized !== 'FOK') {
+            return { ok: false, status: 400, message: 'execution_type must be GTC, IOC, or FOK' };
+        }
+        executionType = normalized;
+    }
+
     const price = fields.price;
     const quantity = fields.quantity;
     const ds = fields.delivery_start;
@@ -321,25 +335,69 @@ function placeOrderV2(username, fields, recordTradeFn) {
     }
 
     // -----------------------------
-    // SELF-MATCH SIMULATION
+    // FOK CHECK: Can we fill the entire quantity?
+    // -----------------------------
+    if (executionType === 'FOK') {
+        let canFill = 0;
+        for (const rest of candidates) {
+            if (side === 'BUY' && price < rest.price) break;
+            if (side === 'SELL' && price > rest.price) break;
+            
+            // Self-match check for FOK
+            if (rest.user === username) {
+                return { ok: false, status: 412, message: 'Self-match prevented' };
+            }
+            
+            canFill += rest.quantity;
+            if (canFill >= quantity) break;
+        }
+        
+        if (canFill < quantity) {
+            // Cannot fill entire order, return cancelled with order_id
+            const orderId = generateOrderId();
+            return { 
+                ok: true, 
+                order: {
+                    orderId,
+                    user: username,
+                    side,
+                    price,
+                    quantity: 0,
+                    originalQuantity: quantity,
+                    deliveryStart: ds,
+                    deliveryEnd: de,
+                    active: false,
+                    status: 'CANCELLED',
+                    createdAt: Date.now(),
+                    isV2: true
+                },
+                filledQuantity: 0
+            };
+        }
+    }
+
+    // -----------------------------
+    // SELF-MATCH SIMULATION (for GTC and IOC)
     // Simulate the execution to see if it *actually* reaches a self-match.
     // -----------------------------
-    let simRemaining = quantity;
-    for (const rest of candidates) {
-        if (simRemaining <= 0) break;
+    if (executionType !== 'FOK') {
+        let simRemaining = quantity;
+        for (const rest of candidates) {
+            if (simRemaining <= 0) break;
 
-        // Price crossing check
-        if (side === 'BUY' && price < rest.price) break;
-        if (side === 'SELL' && price > rest.price) break;
+            // Price crossing check
+            if (side === 'BUY' && price < rest.price) break;
+            if (side === 'SELL' && price > rest.price) break;
 
-        // If we reach here, we WOULD match with `rest`
-        if (rest.user === username) {
-            return { ok: false, status: 412, message: 'Self-match prevented' };
+            // If we reach here, we WOULD match with `rest`
+            if (rest.user === username) {
+                return { ok: false, status: 412, message: 'Self-match prevented' };
+            }
+
+            // Deduct from simulation to see if we reach the next order
+            const tq = Math.min(simRemaining, rest.quantity);
+            simRemaining -= tq;
         }
-
-        // Deduct from simulation to see if we reach the next order
-        const tq = Math.min(simRemaining, rest.quantity);
-        simRemaining -= tq;
     }
 
     // -----------------------------
@@ -403,11 +461,30 @@ function placeOrderV2(username, fields, recordTradeFn) {
 
     incoming.quantity = remaining;
 
-    if (remaining <= 0) {
+    // Handle execution type logic
+    if (executionType === 'IOC') {
+        // IOC: Cancel any unfilled remainder
+        if (remaining > 0) {
+            incoming.quantity = 0;
+            incoming.active = false;
+            incoming.status = 'CANCELLED';
+        } else {
+            incoming.active = false;
+            incoming.status = 'FILLED';
+        }
+    } else if (executionType === 'FOK') {
+        // FOK: Should be fully filled (we checked earlier)
+        incoming.quantity = 0;
         incoming.active = false;
         incoming.status = 'FILLED';
     } else {
-        orders.push(incoming);
+        // GTC: Add to book if not fully filled
+        if (remaining <= 0) {
+            incoming.active = false;
+            incoming.status = 'FILLED';
+        } else {
+            orders.push(incoming);
+        }
     }
 
     saveOrdersState();
@@ -593,7 +670,7 @@ function modifyOrderV2(username, orderId, fields, recordTradeFn) {
             delivery_start: ds,
             delivery_end: de,
             timestamp: Date.now(),
-            isV2: true // FIXED: Added isV2 flag to modifyOrder match execution
+            isV2: true
         });
 
         rest.quantity -= tq;
